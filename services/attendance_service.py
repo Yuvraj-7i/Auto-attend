@@ -7,6 +7,80 @@ from services.face_recognition_service import face_service
 
 logger = logging.getLogger("AutoAttend-AttendanceService")
 
+
+def _combine_date_time(date_val, time_val):
+    if not date_val or not time_val:
+        return None
+    date_text = str(date_val)[:10]
+    time_text = str(time_val)[:8]
+    if len(time_text) == 5:
+        time_text += ":00"
+    try:
+        return datetime.datetime.strptime(f"{date_text} {time_text}", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _grace_minutes(class_section, subject_id):
+    slot = fetch_one(
+        """
+        SELECT grace_minutes FROM lecture_slots
+        WHERE class_section = %s AND subject_id = %s AND is_active = 1
+        ORDER BY id LIMIT 1
+        """,
+        (class_section, subject_id)
+    )
+    if slot and slot.get("grace_minutes") is not None:
+        return int(slot["grace_minutes"])
+    setting = fetch_one(
+        "SELECT value_text FROM system_settings WHERE key_name = %s",
+        ("attendance_grace_period_mins",)
+    )
+    try:
+        return int(setting["value_text"]) if setting else 15
+    except (TypeError, ValueError):
+        return 15
+
+
+def _upsert_late_row(**fields):
+    existing = fetch_one(
+        """
+        SELECT id FROM late_arrivals
+        WHERE student_id = %s AND subject_id = %s AND attendance_date = %s AND source = %s
+        """,
+        (fields["student_id"], fields["subject_id"], fields["attendance_date"], fields["source"])
+    )
+    if existing:
+        execute_query(
+            """
+            UPDATE late_arrivals
+            SET class_section = %s, session_id = %s, lecture_start = %s, arrival_time = %s,
+                grace_minutes = %s, minutes_late = %s, updated_at = %s
+            WHERE id = %s
+            """,
+            (
+                fields["class_section"], fields["session_id"], fields["lecture_start"],
+                fields["arrival_time"], fields["grace_minutes"], fields["minutes_late"],
+                datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), existing["id"]
+            )
+        )
+        return existing["id"]
+    result = execute_query(
+        """
+        INSERT INTO late_arrivals
+        (student_id, class_section, subject_id, session_id, attendance_date, lecture_start,
+         arrival_time, grace_minutes, minutes_late, source)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            fields["student_id"], fields["class_section"], fields["subject_id"], fields["session_id"],
+            fields["attendance_date"], fields["lecture_start"], fields["arrival_time"],
+            fields["grace_minutes"], fields["minutes_late"], fields["source"]
+        )
+    )
+    return result["last_id"]
+
+
 class AttendanceService:
     """
     Manages session workflows, attendance records, audit logs,
@@ -129,7 +203,7 @@ class AttendanceService:
         Allows authorized teacher to correct attendance status with mandatory audit logging.
         Prevents unauthorized alterations without a trace.
         """
-        valid_statuses = ("present", "absent", "late", "flagged")
+        valid_statuses = ("present", "absent", "late", "flagged", "needs_review", "approved_leave")
         if new_status not in valid_statuses:
             return {"success": False, "message": "Invalid status value"}
 
@@ -156,6 +230,53 @@ class AttendanceService:
         )
 
         return {"success": True, "message": f"Status updated to '{new_status}' successfully."}
+
+    def record_live_arrival(self, session_id: int, student_id: int):
+        """
+        Uses the live-camera observation clock to decide lateness.
+        A group photo never calls this, because a still image has no arrival time.
+        """
+        session = fetch_one("SELECT * FROM attendance_sessions WHERE id = %s", (session_id,))
+        student = fetch_one("SELECT class_section FROM students WHERE id = %s", (student_id,))
+        if not session or not student:
+            return None
+
+        arrival = datetime.datetime.now().replace(microsecond=0)
+        start = _combine_date_time(session.get("session_date"), session.get("start_time"))
+        if start is None:
+            return None
+
+        grace = _grace_minutes(student["class_section"], session["subject_id"])
+        elapsed = int((arrival - start).total_seconds() // 60)
+        if elapsed <= grace:
+            execute_query(
+                "UPDATE attendance_records SET arrival_status = %s WHERE session_id = %s AND student_id = %s",
+                ("on_time", session_id, student_id)
+            )
+            return {"late": False, "minutes_late": 0}
+
+        minutes_late = elapsed - grace
+        execute_query(
+            """
+            UPDATE attendance_records
+            SET status = 'late', arrival_status = %s
+            WHERE session_id = %s AND student_id = %s
+            """,
+            (f"late_{minutes_late}m", session_id, student_id)
+        )
+        _upsert_late_row(
+            student_id=student_id,
+            class_section=student["class_section"],
+            subject_id=session["subject_id"],
+            session_id=session_id,
+            attendance_date=str(session["session_date"])[:10],
+            lecture_start=str(session["start_time"])[:8],
+            arrival_time=arrival.strftime("%Y-%m-%d %H:%M:%S"),
+            grace_minutes=grace,
+            minutes_late=minutes_late,
+            source="live_camera"
+        )
+        return {"late": True, "minutes_late": minutes_late}
 
     def get_attendance_records(self, filters: dict = None, page: int = 1, per_page: int = 15):
         """Fetches filtered, paginated attendance records with teacher audit details."""
@@ -333,10 +454,10 @@ class AttendanceService:
         student_performance = fetch_all(
             """
             SELECT st.id, st.full_name, st.roll_number, st.class_section, st.avatar_url,
-                   SUM(CASE WHEN ar.status = 'present' THEN 1 ELSE 0 END) as present_count,
-                   COUNT(ar.id) as total_classes,
-                   ROUND(CAST(SUM(CASE WHEN ar.status = 'present' THEN 1 ELSE 0 END) AS FLOAT) /
-                         NULLIF(COUNT(ar.id), 0) * 100, 1) as percentage
+                   SUM(CASE WHEN ar.status IN ('present', 'late') THEN 1 ELSE 0 END) as present_count,
+                   SUM(CASE WHEN ar.status IN ('present', 'late', 'absent') THEN 1 ELSE 0 END) as total_classes,
+                   ROUND(CAST(SUM(CASE WHEN ar.status IN ('present', 'late') THEN 1 ELSE 0 END) AS FLOAT) /
+                         NULLIF(SUM(CASE WHEN ar.status IN ('present', 'late', 'absent') THEN 1 ELSE 0 END), 0) * 100, 1) as percentage
             FROM students st
             LEFT JOIN attendance_records ar ON st.id = ar.student_id
             GROUP BY st.id, st.full_name, st.roll_number, st.class_section, st.avatar_url

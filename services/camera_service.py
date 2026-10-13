@@ -9,6 +9,7 @@ import numpy as np
 import logging
 from config import Config
 from services.face_recognition_service import face_service
+from services.attendance_service import attendance_service
 from database.db_manager import fetch_all, fetch_one, execute_query
 
 logger = logging.getLogger("AutoAttend-Camera")
@@ -118,6 +119,7 @@ class CameraService:
                         det["is_marked"] = marked
                         if marked:
                             marked_students.append(det)
+                            attendance_service.record_live_arrival(target_session, stu_id)
                             self._add_event(f"Attendance Recorded: {det['full_name']} ({det['roll_number']})", "success", det)
                     elif det.get("status") == "low_confidence":
                         self._add_event(f"Uncertain Match: {det['full_name']} (Under Review)", "warning", det)
@@ -231,6 +233,7 @@ class CameraService:
                     self.active_session_id, stu["id"], confidence, Config.MIN_OBSERVATIONS
                 )
                 if marked:
+                    attendance_service.record_live_arrival(self.active_session_id, stu["id"])
                     self._add_event(f"Attendance Recorded: {stu['full_name']} ({stu['roll_number']})", "success", stu)
 
         # Update stats
@@ -299,6 +302,7 @@ class CameraService:
                                     self.active_session_id, det["student_id"], conf, Config.MIN_OBSERVATIONS
                                 )
                                 if marked:
+                                    attendance_service.record_live_arrival(self.active_session_id, det["student_id"])
                                     self._add_event(f"Attendance Recorded: {name}", "success", det)
                         elif status == "low_confidence":
                             color = (48, 170, 245) # Amber

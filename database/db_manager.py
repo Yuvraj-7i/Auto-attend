@@ -205,6 +205,8 @@ class DatabaseManager:
 
         cursor.close()
         conn.close()
+        self._ensure_runtime_columns()
+        self._ensure_runtime_data()
         logger.info("Database initialized successfully!")
 
     def _create_sqlite_tables(self, cursor):
@@ -326,6 +328,110 @@ class DatabaseManager:
             description TEXT NULL,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS lecture_slots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            class_section TEXT NOT NULL,
+            subject_id INTEGER NOT NULL,
+            classroom_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            start_time TEXT NOT NULL,
+            end_time TEXT NOT NULL,
+            grace_minutes INTEGER DEFAULT 10,
+            is_active INTEGER DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (subject_id) REFERENCES subjects(id),
+            FOREIGN KEY (classroom_id) REFERENCES classrooms(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS group_photo_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            teacher_id INTEGER NOT NULL,
+            class_section TEXT NOT NULL,
+            subject_id INTEGER NOT NULL,
+            lecture_slot_id INTEGER,
+            session_id INTEGER,
+            attendance_date TEXT NOT NULL,
+            observation_time TEXT,
+            photo_path TEXT NOT NULL,
+            annotated_path TEXT,
+            upload_timestamp TEXT NOT NULL,
+            processing_timestamp TEXT,
+            status TEXT DEFAULT 'draft',
+            faces_detected INTEGER DEFAULT 0,
+            matched_count INTEGER DEFAULT 0,
+            unmatched_count INTEGER DEFAULT 0,
+            review_count INTEGER DEFAULT 0,
+            existing_warning TEXT,
+            confirmed_by INTEGER,
+            confirmation_timestamp TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (teacher_id) REFERENCES users(id),
+            FOREIGN KEY (subject_id) REFERENCES subjects(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS group_photo_faces (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id INTEGER NOT NULL,
+            student_id INTEGER,
+            bbox TEXT,
+            confidence REAL DEFAULT 0,
+            match_result TEXT NOT NULL,
+            attendance_status TEXT NOT NULL,
+            arrival_status TEXT DEFAULT 'unknown',
+            verification_status TEXT DEFAULT 'pending',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (batch_id) REFERENCES group_photo_batches(id) ON DELETE CASCADE,
+            FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS leave_applications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id INTEGER NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            attachment_path TEXT,
+            status TEXT DEFAULT 'pending',
+            teacher_comment TEXT,
+            reviewed_by INTEGER,
+            reviewed_at TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
+            FOREIGN KEY (reviewed_by) REFERENCES users(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS late_arrivals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id INTEGER NOT NULL,
+            class_section TEXT NOT NULL,
+            subject_id INTEGER NOT NULL,
+            session_id INTEGER,
+            attendance_date TEXT NOT NULL,
+            lecture_start TEXT NOT NULL,
+            arrival_time TEXT NOT NULL,
+            grace_minutes INTEGER DEFAULT 10,
+            minutes_late INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            correction_note TEXT,
+            corrected_by INTEGER,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(student_id, subject_id, attendance_date, source),
+            FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
+            FOREIGN KEY (subject_id) REFERENCES subjects(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            kind TEXT DEFAULT 'info',
+            is_read INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
         """)
 
     def _seed_sqlite_data(self, cursor):
@@ -342,7 +448,7 @@ class DatabaseManager:
         cursor.execute("""
             INSERT OR IGNORE INTO users (id, full_name, email, password_hash, role, department, avatar_url) VALUES
             (1, 'Dr. Ajay Jaiswal', 'ajay.jaiswal@piemr.edu.in', ?, 'admin', 'Computer Science & Engineering', '/static/images/avatars/teacher_ajay.png'),
-            (2, 'Prof. Neha Sharma', 'teacher@autoattend.ai', ?, 'teacher', 'Computer Science & Engineering', '/static/images/avatars/teacher_neha.png');
+            (2, 'Sandeep', 'teacher@autoattend.ai', ?, 'teacher', 'Computer Science & Engineering', '/static/images/avatars/teacher_neha.png');
         """, (pw_hash, pw_hash))
 
         # Seed Classrooms
@@ -382,7 +488,9 @@ class DatabaseManager:
             ('frame_capture_interval', '1.5', 'Time interval in seconds between backend AI frames'),
             ('camera_source', '0', 'Default camera index (0 = default webcam) or RTSP stream URL'),
             ('enable_anti_spoofing', 'false', 'Enable liveness and anti-spoofing verification'),
-            ('attendance_grace_period_mins', '15', 'Minutes from lecture start after which student is considered late');
+            ('attendance_grace_period_mins', '15', 'Minutes from lecture start after which student is considered late'),
+            ('low_attendance_threshold', '75', 'Percentage below which a student is flagged for low attendance'),
+            ('review_margin', '0.12', 'Similarity band below the match threshold that is marked Needs Review');
         """)
 
         # Seed sample past attendance sessions and records for realistic analytics
@@ -442,6 +550,89 @@ class DatabaseManager:
                     cursor.execute(stmt)
                 except Exception as e:
                     logger.warning("SQL statement notice: %s", str(e))
+
+    def _column_exists(self, table, column):
+        if self.is_mysql:
+            row = self.fetch_one(
+                """
+                SELECT COLUMN_NAME AS name FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME = %s
+                """,
+                (self.config.DB_NAME, table, column)
+            )
+            return row is not None
+        rows = self.fetch_all(f"PRAGMA table_info({table})")
+        return any(row.get("name") == column for row in rows)
+
+    def _ensure_runtime_columns(self):
+        """Adds columns to databases that were created before later features."""
+        additions = (
+            ("users", "student_ref_id", "INTEGER"),
+            ("attendance_sessions", "class_section", "TEXT"),
+            ("attendance_sessions", "lecture_slot_id", "INTEGER"),
+            ("attendance_records", "arrival_status", "TEXT"),
+            ("attendance_records", "teacher_verification", "TEXT"),
+        )
+        for table, column, typedef in additions:
+            if self._column_exists(table, column):
+                continue
+            self.execute(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}")
+
+    def _ensure_runtime_data(self):
+        """Fills timetable, settings, student logins, and the teacher display name."""
+        try:
+            self.execute(
+                "UPDATE users SET full_name = %s WHERE email = %s AND full_name = %s",
+                ("Sandeep", "teacher@autoattend.ai", "Prof. Neha Sharma")
+            )
+        except Exception as exc:
+            logger.warning("Teacher rename skipped: %s", exc)
+
+        settings = (
+            ("low_attendance_threshold", "75", "Percentage below which a student is flagged for low attendance"),
+            ("review_margin", "0.12", "Similarity band below the match threshold that is marked Needs Review"),
+            ("attendance_grace_period_mins", "15", "Minutes from lecture start after which student is considered late"),
+        )
+        for key, value, description in settings:
+            existing = self.fetch_one("SELECT key_name FROM system_settings WHERE key_name = %s", (key,))
+            if not existing:
+                self.execute(
+                    "INSERT INTO system_settings (key_name, value_text, description) VALUES (%s, %s, %s)",
+                    (key, value, description)
+                )
+
+        slot_count = self.fetch_one("SELECT COUNT(*) AS cnt FROM lecture_slots")
+        if not slot_count or slot_count.get("cnt", 0) == 0:
+            slots = (
+                ("CSE-A", 1, 1, "Machine Learning Lecture", "09:00:00", "10:00:00", 10),
+                ("CSE-A", 2, 1, "Computer Vision Lecture", "10:15:00", "11:15:00", 10),
+                ("CSE-A", 3, 3, "Database Systems Lecture", "11:30:00", "12:30:00", 10),
+                ("CSE-B", 2, 2, "Computer Vision Lecture", "14:00:00", "15:00:00", 10),
+            )
+            for slot in slots:
+                self.execute(
+                    """
+                    INSERT INTO lecture_slots
+                    (class_section, subject_id, classroom_id, title, start_time, end_time, grace_minutes, is_active)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, 1)
+                    """,
+                    slot
+                )
+
+        pw_hash = "scrypt:32768:8:1$EV8IWDpWLBKqpZJq$54e4637a301258343f758663bfe30b3d710de764524b4b52b780dd24e18a112ae33f4b016329a1cad5817428e659840f583f4b744b0688e5accff1b4456eb3db"
+        students = self.fetch_all("SELECT id, full_name, email, department FROM students")
+        for student in students:
+            existing = self.fetch_one("SELECT id FROM users WHERE email = %s", (student["email"],))
+            if existing:
+                continue
+            self.execute(
+                """
+                INSERT INTO users (full_name, email, password_hash, role, department, student_ref_id)
+                VALUES (%s, %s, %s, 'student', %s, %s)
+                """,
+                (student["full_name"], student["email"], pw_hash, student["department"], student["id"])
+            )
+
 
 # Singleton instance
 db = DatabaseManager()

@@ -37,7 +37,7 @@ class FaceRecognitionService:
         # structure: { session_id: { student_id: { 'count': int, 'confidences': list } } }
         self._session_observations = {}
 
-    def detect_faces(self, image_bgr):
+    def detect_faces(self, image_bgr, group=False):
         """
         Detects all faces in a BGR image frame.
         Returns a list of bounding boxes: [(x, y, w, h), ...]
@@ -51,8 +51,9 @@ class FaceRecognitionService:
         max_dim = max(h, w)
         scale_ratio = 1.0
         proc_img = image_bgr
-        if max_dim > 1000:
-            scale_ratio = 1000.0 / max_dim
+        scan_limit = 1800 if group else 1000
+        if max_dim > scan_limit:
+            scale_ratio = scan_limit / max_dim
             proc_img = cv2.resize(image_bgr, (int(w * scale_ratio), int(h * scale_ratio)), interpolation=cv2.INTER_AREA)
 
         gray = cv2.cvtColor(proc_img, cv2.COLOR_BGR2GRAY)
@@ -61,7 +62,9 @@ class FaceRecognitionService:
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         gray_clahe = clahe.apply(gray)
 
-        faces = self._run_cascade(self.face_cascade, gray_clahe)
+        min_size = (22, 22) if group else (36, 36)
+        neighbors = 3 if group else 4
+        faces = self._run_cascade(self.face_cascade, gray_clahe, min_neighbors=neighbors, min_size=min_size)
 
         # Fallback pass: standard global histogram equalization if primary pass found no face
         if len(faces) == 0:
@@ -81,9 +84,29 @@ class FaceRecognitionService:
                 faces = [(img_w - x - w_box, y, w_box, h_box) for (x, y, w_box, h_box) in flipped_faces]
 
         if scale_ratio != 1.0:
-            return [(int(x / scale_ratio), int(y / scale_ratio), int(w_box / scale_ratio), int(h_box / scale_ratio)) for (x, y, w_box, h_box) in faces]
+            faces = [(int(x / scale_ratio), int(y / scale_ratio), int(w_box / scale_ratio), int(h_box / scale_ratio)) for (x, y, w_box, h_box) in faces]
+        else:
+            faces = [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
+        if group:
+            faces = self._suppress_overlaps(faces)
+        return faces
 
-        return [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
+    def _iou(self, a, b):
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+        x1, y1 = max(ax, bx), max(ay, by)
+        x2, y2 = min(ax + aw, bx + bw), min(ay + ah, by + bh)
+        inter = max(0, x2 - x1) * max(0, y2 - y1)
+        union = aw * ah + bw * bh - inter
+        return inter / union if union else 0.0
+
+    def _suppress_overlaps(self, boxes, iou_thresh=0.35):
+        ordered = sorted(boxes, key=lambda box: box[2] * box[3], reverse=True)
+        kept = []
+        for box in ordered:
+            if all(self._iou(box, other) < iou_thresh for other in kept):
+                kept.append(box)
+        return kept
 
     def _run_cascade(self, cascade, gray, min_neighbors=4, min_size=(36, 36)):
         if cascade is None or cascade.empty():
@@ -459,6 +482,66 @@ class FaceRecognitionService:
             return True, obs_count, avg_conf
 
         return False, obs_count, avg_conf
+
+    def match_group_photo(self, image_bgr, class_section: str, threshold: float = 0.65, review_margin: float = 0.12):
+        """
+        Detects every face in a classroom photo and compares embeddings with students
+        enrolled in the selected class. Uncertain scores stay Needs Review.
+        The same student is kept once; extra detections are marked duplicate.
+        """
+        boxes = self.detect_faces(image_bgr, group=True)
+        templates = fetch_all(
+            """
+            SELECT ft.student_id, ft.embedding_data, s.full_name, s.roll_number, s.student_id AS enrollment_no
+            FROM face_templates ft
+            JOIN students s ON ft.student_id = s.id
+            WHERE s.consent_given = 1 AND s.class_section = %s
+            """,
+            (class_section,)
+        )
+        detections = []
+        for (x, y, w, h) in boxes:
+            roi = image_bgr[y:y + h, x:x + w]
+            embedding = self.extract_face_embedding(roi)
+            best = None
+            best_sim = 0.0
+            if embedding:
+                for template in templates:
+                    sim = self._best_similarity(embedding, template["embedding_data"])
+                    if sim > best_sim:
+                        best_sim = sim
+                        best = template
+            review_floor = max(0.45, threshold - review_margin)
+            if best and best_sim >= threshold:
+                result = "matched"
+            elif best and best_sim >= review_floor:
+                result = "needs_review"
+            else:
+                result = "unmatched"
+                best = None
+                best_sim = best_sim if best_sim else 0.0
+            detections.append({
+                "bbox": [int(x), int(y), int(w), int(h)],
+                "student_id": best["student_id"] if best else None,
+                "full_name": best["full_name"] if best else None,
+                "roll_number": best["roll_number"] if best else None,
+                "confidence": round(float(best_sim), 3),
+                "match_result": result
+            })
+
+        best_by_student = {}
+        for index, det in enumerate(detections):
+            sid = det["student_id"]
+            if not sid or det["match_result"] == "unmatched":
+                continue
+            current = best_by_student.get(sid)
+            if current is None or det["confidence"] > detections[current]["confidence"]:
+                best_by_student[sid] = index
+        for index, det in enumerate(detections):
+            sid = det["student_id"]
+            if sid and sid in best_by_student and best_by_student[sid] != index:
+                det["match_result"] = "duplicate"
+        return detections
 
     def clear_session_cache(self, session_id: int):
         """Cleans up memory when an attendance session concludes."""

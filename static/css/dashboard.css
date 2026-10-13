@@ -565,3 +565,39 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+.student-link { display: none; }
+body.role-student .staff-link { display: none; }
+body.role-student .student-link { display: flex; }
+.lecture-list, .activity-list { display: flex; flex-direction: column; gap: 0.75rem; }
+.lecture-row {
+  display: flex; justify-content: space-between; gap: 1rem; align-items: center;
+  padding: 0.85rem 0; border-bottom: 1px solid var(--border-subtle); flex-wrap: wrap;
+}
+.lecture-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.ops-grid { display: grid; grid-template-columns: 320px 1fr; gap: 1.25rem; }
+.dropzone {
+  border: 2px dashed #C7D2FE; border-radius: 16px; min-height: 220px; background: #F8FAFF;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
+  padding: 1.5rem; cursor: pointer; gap: 0.5rem;
+}
+.dropzone.dragover { background: #EEF2FF; border-color: var(--primary); }
+.ops-form { display: flex; flex-direction: column; gap: 0.75rem; }
+.ops-form label { font-size: 0.75rem; font-weight: 700; color: var(--text-muted); }
+.ops-form input, .ops-form select, .ops-form textarea {
+  width: 100%; border: 1px solid var(--border-subtle); border-radius: 10px; padding: 0.7rem 0.8rem; background: #fff;
+}
+.preview-frame { width: 100%; border-radius: 16px; overflow: hidden; background: #0F172A; min-height: 240px; }
+.preview-frame img { width: 100%; display: block; }
+.progress-track { height: 8px; background: #E2E8F0; border-radius: 99px; overflow: hidden; }
+.progress-bar { height: 100%; width: 0; background: linear-gradient(90deg, #4F46E5, #06B6D4); }
+.status-select { border-radius: 8px; padding: 0.35rem 0.5rem; border: 1px solid var(--border-subtle); }
+.summary-pills { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0.75rem; margin: 1rem 0; }
+.pill-card { background: #fff; border: 1px solid var(--border-subtle); border-radius: 14px; padding: 0.9rem; }
+.pill-card strong { display: block; font-size: 1.4rem; }
+.warn-banner { background: #FFF7ED; color: #9A3412; border-radius: 12px; padding: 0.85rem 1rem; margin-bottom: 1rem; }
+.filter-bar { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.filter-bar input, .filter-bar select { border: 1px solid var(--border-subtle); border-radius: 10px; padding: 0.6rem 0.75rem; }
+@media (max-width: 900px) {
+  .ops-grid, .summary-pills { grid-template-columns: 1fr; }
+}

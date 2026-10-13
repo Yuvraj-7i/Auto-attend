@@ -1,3 +1,5 @@
+import csv
+import io
 from flask import Blueprint, request, jsonify, Response
 from database.db_manager import fetch_all, fetch_one, execute_query
 from services.attendance_service import attendance_service
@@ -86,6 +88,41 @@ def export_attendance_csv():
         mimetype="text/csv",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
+
+@report_bp.route('/reports/export.xls', methods=['GET'])
+@login_required
+def export_attendance_excel():
+    """Excel spreadsheet of the same attendance export. No extra package is required."""
+    filters = {
+        "student_id": request.args.get('student_id'),
+        "classroom_id": request.args.get('classroom_id'),
+        "subject_id": request.args.get('subject_id'),
+        "status": request.args.get('status'),
+        "start_date": request.args.get('start_date'),
+        "end_date": request.args.get('end_date')
+    }
+    csv_data = attendance_service.generate_csv_report(filters)
+    rows = list(csv.reader(io.StringIO(csv_data)))
+    xml_rows = []
+    for row in rows:
+        cells = "".join(f"<Cell><Data ss:Type=\"String\">{_xml_escape(cell)}</Data></Cell>" for cell in row)
+        xml_rows.append(f"<Row>{cells}</Row>")
+    workbook = (
+        '<?xml version="1.0"?>'
+        '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" '
+        'xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">'
+        '<Worksheet ss:Name="Attendance"><Table>'
+        + "".join(xml_rows) +
+        '</Table></Worksheet></Workbook>'
+    )
+    return Response(
+        workbook,
+        mimetype="application/vnd.ms-excel",
+        headers={"Content-Disposition": "attachment; filename=AutoAttend_Report.xls"}
+    )
+
+def _xml_escape(value):
+    return (value or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 @report_bp.route('/settings', methods=['GET'])
 @login_required

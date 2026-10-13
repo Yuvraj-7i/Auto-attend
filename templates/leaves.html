@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block page_title %}Leave Requests{% endblock %}
+{% block content %}
+<section class="hero-banner" style="margin-bottom:1.25rem;">
+  <div>
+    <h1>Leave requests</h1>
+    <p class="hero-subtitle">Approved leave stays separate from physical attendance and is not counted as Present.</p>
+  </div>
+</section>
+<div class="filter-bar">
+  <button class="btn btn-sm btn-secondary" data-status="" type="button">All</button>
+  <button class="btn btn-sm btn-secondary" data-status="pending" type="button">Pending</button>
+  <button class="btn btn-sm btn-secondary" data-status="approved" type="button">Approved</button>
+  <button class="btn btn-sm btn-secondary" data-status="rejected" type="button">Rejected</button>
+</div>
+<div id="leave-list" class="activity-list"></div>
+{% endblock %}
+{% block scripts %}<script src="/static/js/leaves.js"></script>{% endblock %}
