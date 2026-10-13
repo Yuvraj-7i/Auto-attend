@@ -111,7 +111,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const roleEl = document.getElementById('topbar-user-role');
         const avatarEl = document.getElementById('topbar-user-avatar');
         if (nameEl) nameEl.textContent = data.user.name;
-        if (roleEl) roleEl.textContent = data.user.role === 'admin' ? 'Faculty Admin' : 'Teacher';
+        if (roleEl) {
+          const labels = { admin: 'Faculty Admin', student: 'Student', teacher: 'Teacher' };
+          roleEl.textContent = labels[data.user.role] || 'Teacher';
+        }
         if (avatarEl && data.user.avatar) avatarEl.src = data.user.avatar;
       }
     })

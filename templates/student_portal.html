@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block page_title %}Student Portal{% endblock %}
+{% block content %}
+<section class="hero-banner" style="margin-bottom:1.25rem;">
+  <div>
+    <h1>Your attendance and leave</h1>
+    <p class="hero-subtitle">Apply for leave with a date range and a reason. You will see a notification here when a teacher decides.</p>
+  </div>
+</section>
+<div class="ops-grid">
+  <form id="leave-form" class="card ops-form">
+    <h3 class="card-title">Apply for leave</h3>
+    <label>From</label>
+    <input type="date" name="start_date" required>
+    <label>To</label>
+    <input type="date" name="end_date" required>
+    <label>Reason</label>
+    <textarea name="reason" rows="4" required placeholder="Why you need leave"></textarea>
+    <label>Supporting document (optional)</label>
+    <input type="file" name="attachment" accept=".pdf,.jpg,.jpeg,.png,.webp">
+    <button class="btn btn-primary" type="submit">Submit application</button>
+  </form>
+  <div>
+    <div class="card" style="margin-bottom:1rem;">
+      <h3 class="card-title">Attendance</h3>
+      <p id="my-attendance">Loading your percentage…</p>
+    </div>
+    <div class="card" style="margin-bottom:1rem;">
+      <div class="card-header"><h3 class="card-title">Notifications</h3><button class="btn btn-sm btn-secondary" id="mark-read" type="button">Mark read</button></div>
+      <div id="note-list" class="activity-list"></div>
+    </div>
+    <div class="card">
+      <h3 class="card-title">My applications</h3>
+      <div id="my-leaves" class="activity-list"></div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="/static/js/student_portal.js"></script>{% endblock %}

@@ -9,6 +9,7 @@ let doughnutChart = null;
 document.addEventListener('DOMContentLoaded', () => {
   setGreetingTime();
   fetchDashboardData();
+  fetchTeacherWorkload();
 });
 
 function setGreetingTime() {
@@ -18,7 +19,13 @@ function setGreetingTime() {
   let greet = 'Good morning';
   if (hour >= 12 && hour < 17) greet = 'Good afternoon';
   else if (hour >= 17) greet = 'Good evening';
-  greetingEl.innerHTML = `${greet}, <span style="color: var(--accent-cyan);">Teacher</span>`;
+  const name = document.getElementById('topbar-user-name')?.textContent || 'Sandeep';
+  greetingEl.innerHTML = `${greet}, <span style="color: var(--accent-cyan);">${name}</span>`;
+  fetch('/api/auth/me').then(r => r.json()).then(data => {
+    if (data.authenticated && data.user && greetingEl) {
+      greetingEl.innerHTML = `${greet}, <span style="color: var(--accent-cyan);">${data.user.name}</span>`;
+    }
+  }).catch(() => {});
 }
 
 async function fetchDashboardData() {
@@ -36,6 +43,54 @@ async function fetchDashboardData() {
   } catch (err) {
     console.error(err);
     showToast('Failed to load dashboard metrics', 'danger');
+  }
+}
+
+async function fetchTeacherWorkload() {
+  try {
+    const res = await fetch('/api/dashboard/teacher');
+    const data = await res.json();
+    if (!data.success) return;
+    const leaveEl = document.getElementById('kpi-pending-leave');
+    const lateEl = document.getElementById('kpi-late-today');
+    const lowEl = document.getElementById('kpi-low-attendance');
+    if (leaveEl) leaveEl.textContent = data.pending_leaves || 0;
+    if (lateEl) lateEl.textContent = data.late_today || 0;
+    if (lowEl) lowEl.textContent = (data.low_attendance.students || []).length;
+    const note = document.getElementById('low-attendance-note');
+    if (note) note.textContent = `Under ${data.low_attendance.threshold}% after excluding approved leave`;
+    const lectures = document.getElementById('today-lectures');
+    if (lectures) {
+      lectures.innerHTML = (data.lectures || []).map(slot => `
+        <div class="lecture-row">
+          <div>
+            <strong>${slot.start_time?.slice(0,5)} · ${slot.title}</strong>
+            <div>${slot.class_section} · ${slot.subject_code} · ${slot.room_number}</div>
+          </div>
+          <div class="lecture-actions">
+            <a class="btn btn-sm btn-cyan" href="/live-attendance">Live</a>
+            <a class="btn btn-sm btn-primary" href="/group-photo?class=${encodeURIComponent(slot.class_section)}&subject=${slot.subject_id}&slot=${slot.id}">Upload Class Photo</a>
+          </div>
+        </div>
+      `).join('') || '<p>No lectures are scheduled.</p>';
+    }
+    const lowList = document.getElementById('low-attendance-list');
+    if (lowList) {
+      const students = data.low_attendance.students || [];
+      lowList.innerHTML = students.slice(0, 6).map(s => `
+        <div class="lecture-row"><div><strong>${s.full_name}</strong><div>${s.roll_number} · ${s.class_section}</div></div><span class="badge badge-danger">${s.percentage}%</span></div>
+      `).join('') || '<p>No students are under the threshold.</p>';
+    }
+    const history = document.getElementById('audit-history');
+    if (history) {
+      history.innerHTML = (data.history || []).map(item => `
+        <div class="lecture-row"><div><strong>${item.action.replaceAll('_', ' ')}</strong><div>${item.details || ''}</div></div><small>${(item.created_at || '').slice(0, 16)}</small></div>
+      `).join('') || '<p>No confirmations yet.</p>';
+    }
+    const leaveLink = document.getElementById('leave-alert-link');
+    if (leaveLink && data.pending_leaves) leaveLink.textContent = `${data.pending_leaves} leave requests`;
+  } catch (err) {
+    console.error(err);
   }
 }
 

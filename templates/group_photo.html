@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Group Photo Attendance — AutoAttend{% endblock %}
+{% block page_title %}Group Photo Attendance{% endblock %}
+{% block content %}
+<section class="hero-banner" style="margin-bottom: 1.25rem;">
+  <div class="hero-content">
+    <h1>Upload Class Photo</h1>
+    <p class="hero-subtitle">Take a classroom photo on a phone, then upload it for the lecture date. Faces are matched to enrolled students. Nothing is saved until you confirm.</p>
+  </div>
+</section>
+
+<div class="ops-grid">
+  <div class="card">
+    <h3 class="card-title" style="margin-bottom: 1rem;">Session</h3>
+    <form id="photo-form" class="ops-form">
+      <label for="class-section">Class</label>
+      <select id="class-section" required></select>
+      <label for="subject-id">Subject</label>
+      <select id="subject-id" required></select>
+      <label for="lecture-slot">Lecture / session</label>
+      <select id="lecture-slot" required></select>
+      <label for="attendance-date">Attendance date</label>
+      <input type="date" id="attendance-date" required>
+      <label for="observation-time">Observation time (optional)</label>
+      <input type="time" id="observation-time">
+      <small>Set this only if you know when the photo was taken. It does not prove each student's arrival time.</small>
+      <div id="dropzone" class="dropzone">
+        <strong>Drop the class photo here</strong>
+        <span>JPG, JPEG, PNG, WEBP, or BMP</span>
+        <div style="display:flex; gap:0.5rem; flex-wrap:wrap; justify-content:center;">
+          <button type="button" class="btn btn-secondary btn-sm" id="gallery-btn">Upload from Gallery</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="camera-btn">Use phone camera</button>
+        </div>
+      </div>
+      <input id="gallery-input" type="file" accept="image/jpeg,image/png,image/webp,image/bmp,.jpg,.jpeg" hidden>
+      <input id="camera-input" type="file" accept="image/*" capture="environment" hidden>
+      <div class="progress-track" id="progress-wrap" style="display:none;"><div class="progress-bar" id="progress-bar"></div></div>
+      <p id="upload-error" style="color:#B91C1C; min-height:1.2rem;"></p>
+      <button type="button" class="btn btn-primary" id="detect-btn" disabled>Detect Faces &amp; Generate Attendance</button>
+    </form>
+  </div>
+  <div class="card">
+    <h3 class="card-title">Preview</h3>
+    <div class="preview-frame" style="margin-top:1rem;">
+      <img id="preview-image" alt="Class photo preview" style="display:none;">
+      <div id="preview-empty" style="color:#CBD5E1; padding:4rem 1rem; text-align:center;">The photo appears here before processing.</div>
+    </div>
+  </div>
+</div>
+
+<section id="review-panel" style="display:none; margin-top:1.25rem;">
+  <div id="existing-warning" class="warn-banner" style="display:none;"></div>
+  <div class="summary-pills" id="summary-pills"></div>
+  <div class="card" style="margin-bottom:1rem;">
+    <div class="card-header"><h3 class="card-title">Detected faces</h3></div>
+    <div class="preview-frame"><img id="annotated-image" alt="Faces outlined on the class photo"></div>
+  </div>
+  <div class="card" style="margin-bottom:1rem;">
+    <div class="card-header">
+      <div>
+        <h3 class="card-title">Review attendance</h3>
+        <small>Students missing from the photo stay unmarked until you choose a status. They are not marked absent automatically.</small>
+      </div>
+    </div>
+    <div class="table-responsive">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Student Name</th>
+            <th>Enrollment Number</th>
+            <th>Face Match Confidence</th>
+            <th>Attendance Status</th>
+            <th>Arrival Status</th>
+            <th>Teacher Verification</th>
+          </tr>
+        </thead>
+        <tbody id="review-body"></tbody>
+      </table>
+    </div>
+    <div style="margin-top:1rem; display:flex; justify-content:flex-end;">
+      <button class="btn btn-primary" id="confirm-btn">Confirm &amp; Save Attendance</button>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h3 class="card-title">Unmatched faces</h3></div>
+    <div id="unmatched-list" class="activity-list"></div>
+  </div>
+</section>
+
+<section class="card" style="margin-top:1.25rem;">
+  <div class="card-header"><h3 class="card-title">Recent photo batches</h3></div>
+  <div id="photo-history" class="activity-list"></div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/group_photo.js"></script>
+{% endblock %}

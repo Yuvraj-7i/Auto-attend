@@ -4,7 +4,7 @@ USE autoattend_db;
 -- 1. Faculty / Teachers
 INSERT INTO users (id, full_name, email, password_hash, role, department, avatar_url) VALUES
 (1, 'Dr. Ajay Jaiswal', 'ajay.jaiswal@piemr.edu.in', 'scrypt:32768:8:1$EV8IWDpWLBKqpZJq$54e4637a301258343f758663bfe30b3d710de764524b4b52b780dd24e18a112ae33f4b016329a1cad5817428e659840f583f4b744b0688e5accff1b4456eb3db', 'admin', 'Computer Science & Engineering', '/static/images/avatars/teacher_ajay.png'),
-(2, 'Prof. Neha Sharma', 'teacher@autoattend.ai', 'scrypt:32768:8:1$EV8IWDpWLBKqpZJq$54e4637a301258343f758663bfe30b3d710de764524b4b52b780dd24e18a112ae33f4b016329a1cad5817428e659840f583f4b744b0688e5accff1b4456eb3db', 'teacher', 'Computer Science & Engineering', '/static/images/avatars/teacher_neha.png')
+(2, 'Sandeep', 'teacher@autoattend.ai', 'scrypt:32768:8:1$EV8IWDpWLBKqpZJq$54e4637a301258343f758663bfe30b3d710de764524b4b52b780dd24e18a112ae33f4b016329a1cad5817428e659840f583f4b744b0688e5accff1b4456eb3db', 'teacher', 'Computer Science & Engineering', '/static/images/avatars/teacher_neha.png')
 ON DUPLICATE KEY UPDATE full_name=VALUES(full_name);
 
 -- 2. Classrooms
@@ -49,5 +49,7 @@ INSERT INTO system_settings (key_name, value_text, description) VALUES
 ('frame_capture_interval', '1.5', 'Time interval in seconds between backend AI processing passes'),
 ('camera_source', '0', 'Default camera index (0 = default webcam) or RTSP stream URL'),
 ('enable_anti_spoofing', 'false', 'Enable liveness and anti-spoofing verification'),
-('attendance_grace_period_mins', '15', 'Minutes from lecture start after which student is considered late')
+('attendance_grace_period_mins', '15', 'Minutes from lecture start after which student is considered late'),
+('low_attendance_threshold', '75', 'Percentage below which a student is flagged for low attendance'),
+('review_margin', '0.12', 'Similarity band below the match threshold that is marked Needs Review')
 ON DUPLICATE KEY UPDATE value_text=VALUES(value_text);

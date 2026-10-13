@@ -138,3 +138,120 @@ CREATE TABLE IF NOT EXISTS system_settings (
     description VARCHAR(255) NULL,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 10. Lecture slots (class timetable used by live and group-photo attendance)
+CREATE TABLE IF NOT EXISTS lecture_slots (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    class_section VARCHAR(50) NOT NULL,
+    subject_id INT NOT NULL,
+    classroom_id INT NOT NULL,
+    title VARCHAR(120) NOT NULL,
+    start_time TIME NOT NULL,
+    end_time TIME NOT NULL,
+    grace_minutes INT DEFAULT 10,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_slot_class (class_section),
+    CONSTRAINT fk_slot_subject FOREIGN KEY (subject_id) REFERENCES subjects(id),
+    CONSTRAINT fk_slot_classroom FOREIGN KEY (classroom_id) REFERENCES classrooms(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 11. Group photo batches (review before attendance is saved)
+CREATE TABLE IF NOT EXISTS group_photo_batches (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    teacher_id INT NOT NULL,
+    class_section VARCHAR(50) NOT NULL,
+    subject_id INT NOT NULL,
+    lecture_slot_id INT NULL,
+    session_id INT NULL,
+    attendance_date DATE NOT NULL,
+    observation_time TIME NULL,
+    photo_path VARCHAR(255) NOT NULL,
+    annotated_path VARCHAR(255) NULL,
+    upload_timestamp DATETIME NOT NULL,
+    processing_timestamp DATETIME NULL,
+    status VARCHAR(20) DEFAULT 'draft',
+    faces_detected INT DEFAULT 0,
+    matched_count INT DEFAULT 0,
+    unmatched_count INT DEFAULT 0,
+    review_count INT DEFAULT 0,
+    existing_warning TEXT NULL,
+    confirmed_by INT NULL,
+    confirmation_timestamp DATETIME NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_batch_lookup (class_section, subject_id, attendance_date),
+    CONSTRAINT fk_batch_teacher FOREIGN KEY (teacher_id) REFERENCES users(id),
+    CONSTRAINT fk_batch_subject FOREIGN KEY (subject_id) REFERENCES subjects(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 12. Faces found in a group photo, plus enrolled students not seen in the photo
+CREATE TABLE IF NOT EXISTS group_photo_faces (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    batch_id INT NOT NULL,
+    student_id INT NULL,
+    bbox VARCHAR(80) NULL,
+    confidence FLOAT DEFAULT 0,
+    match_result VARCHAR(30) NOT NULL,
+    attendance_status VARCHAR(30) NOT NULL,
+    arrival_status VARCHAR(60) DEFAULT 'unknown',
+    verification_status VARCHAR(20) DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_face_batch (batch_id),
+    CONSTRAINT fk_face_batch FOREIGN KEY (batch_id) REFERENCES group_photo_batches(id) ON DELETE CASCADE,
+    CONSTRAINT fk_face_student FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 13. Leave applications (kept separate from physical attendance)
+CREATE TABLE IF NOT EXISTS leave_applications (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    student_id INT NOT NULL,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    reason TEXT NOT NULL,
+    attachment_path VARCHAR(255) NULL,
+    status VARCHAR(20) DEFAULT 'pending',
+    teacher_comment TEXT NULL,
+    reviewed_by INT NULL,
+    reviewed_at DATETIME NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_leave_student (student_id),
+    INDEX idx_leave_status (status),
+    CONSTRAINT fk_leave_student FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
+    CONSTRAINT fk_leave_reviewer FOREIGN KEY (reviewed_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 14. Late arrivals that have a reliable timestamp
+CREATE TABLE IF NOT EXISTS late_arrivals (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    student_id INT NOT NULL,
+    class_section VARCHAR(50) NOT NULL,
+    subject_id INT NOT NULL,
+    session_id INT NULL,
+    attendance_date DATE NOT NULL,
+    lecture_start TIME NOT NULL,
+    arrival_time DATETIME NOT NULL,
+    grace_minutes INT DEFAULT 10,
+    minutes_late INT NOT NULL,
+    source VARCHAR(30) NOT NULL,
+    correction_note TEXT NULL,
+    corrected_by INT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY unique_late_mark (student_id, subject_id, attendance_date, source),
+    INDEX idx_late_date (attendance_date),
+    CONSTRAINT fk_late_student FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
+    CONSTRAINT fk_late_subject FOREIGN KEY (subject_id) REFERENCES subjects(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 15. In-app notifications
+CREATE TABLE IF NOT EXISTS notifications (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    title VARCHAR(160) NOT NULL,
+    body TEXT NOT NULL,
+    kind VARCHAR(40) DEFAULT 'info',
+    is_read BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_note_user (user_id, is_read),
+    CONSTRAINT fk_note_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

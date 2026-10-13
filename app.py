@@ -6,6 +6,7 @@ from routes.auth_routes import auth_bp
 from routes.student_routes import student_bp
 from routes.attendance_routes import attendance_bp
 from routes.report_routes import report_bp
+from routes.campus_routes import campus_bp
 
 # Initialize Flask application
 app = Flask(__name__)
@@ -14,6 +15,8 @@ app.config.from_object(Config)
 # Ensure upload and storage directories exist
 os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(os.path.join(Config.UPLOAD_FOLDER, "faces"), exist_ok=True)
+os.makedirs(os.path.join(Config.UPLOAD_FOLDER, "group_photos"), exist_ok=True)
+os.makedirs(os.path.join(Config.UPLOAD_FOLDER, "leaves"), exist_ok=True)
 os.makedirs(os.path.join(app.root_path, "static", "images", "avatars"), exist_ok=True)
 
 @app.after_request
@@ -27,6 +30,7 @@ app.register_blueprint(auth_bp)
 app.register_blueprint(student_bp)
 app.register_blueprint(attendance_bp)
 app.register_blueprint(report_bp)
+app.register_blueprint(campus_bp)
 
 # ==========================================
 # Frontend Page Routes
@@ -45,47 +49,73 @@ def login_page():
         return redirect(url_for('dashboard'))
     return render_template('login.html')
 
+def _require_login():
+    if 'user_id' not in session:
+        return redirect(url_for('login_page'))
+    return None
+
+def _teacher_page(template):
+    gate = _require_login()
+    if gate:
+        return gate
+    if session.get('user_role') == 'student':
+        return redirect(url_for('student_portal'))
+    return render_template(template)
+
 @app.route('/dashboard')
 def dashboard():
     """Main Analytics Dashboard view."""
-    if 'user_id' not in session:
-        return redirect(url_for('login_page'))
-    return render_template('dashboard.html')
+    return _teacher_page('dashboard.html')
 
 @app.route('/live-attendance')
 def live_attendance():
     """Live AI Face Recognition Attendance view."""
-    if 'user_id' not in session:
-        return redirect(url_for('login_page'))
-    return render_template('live_attendance.html')
+    return _teacher_page('live_attendance.html')
 
 @app.route('/students')
 def students_page():
     """Student Enrollment & Biometric Management view."""
-    if 'user_id' not in session:
-        return redirect(url_for('login_page'))
-    return render_template('students.html')
+    return _teacher_page('students.html')
 
 @app.route('/attendance')
 def attendance_page():
     """Attendance Records & Teacher Audit view."""
-    if 'user_id' not in session:
-        return redirect(url_for('login_page'))
-    return render_template('attendance.html')
+    return _teacher_page('attendance.html')
 
 @app.route('/reports')
 def reports_page():
     """Attendance Analytics & CSV Reports view."""
-    if 'user_id' not in session:
-        return redirect(url_for('login_page'))
-    return render_template('reports.html')
+    return _teacher_page('reports.html')
 
 @app.route('/settings')
 def settings_page():
     """System & AI Thresholds Configuration view."""
-    if 'user_id' not in session:
-        return redirect(url_for('login_page'))
-    return render_template('settings.html')
+    return _teacher_page('settings.html')
+
+@app.route('/group-photo')
+def group_photo_page():
+    """Upload a classroom photo and review face matches before saving attendance."""
+    return _teacher_page('group_photo.html')
+
+@app.route('/late-arrivals')
+def late_arrivals_page():
+    """Late-comer records that have a reliable arrival time."""
+    return _teacher_page('late_arrivals.html')
+
+@app.route('/leaves')
+def leaves_page():
+    """Teacher review of student leave applications."""
+    return _teacher_page('leaves.html')
+
+@app.route('/student-portal')
+def student_portal():
+    """Student leave applications and attendance summary."""
+    gate = _require_login()
+    if gate:
+        return gate
+    if session.get('user_role') != 'student':
+        return redirect(url_for('leaves_page'))
+    return render_template('student_portal.html')
 
 # ==========================================
 # Error Handlers
@@ -105,7 +135,7 @@ if __name__ == '__main__':
     print("==================================================")
     print("  AutoAttend is ready.")
     print(f"  Open this address in the browser: http://127.0.0.1:{port}")
-    print("  Login: teacher@autoattend.ai")
+    print("  Teacher login: teacher@autoattend.ai  (Sandeep)")
     print("  Password: password123")
     print("  Use 127.0.0.1 so the browser can turn the camera on.")
     print("==================================================")
