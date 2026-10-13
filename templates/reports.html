@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+
+{% block page_title %}Analytics & Institutional Reports{% endblock %}
+
+{% block content %}
+<!-- Top Report Actions -->
+<div class="card no-print" style="padding: 1.25rem 1.5rem;">
+  <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem;">
+    <div>
+      <h3 class="card-title">Attendance Intelligence & Compliance</h3>
+      <small>Real-time analytics computed directly from the MySQL database</small>
+    </div>
+
+    <div style="display: flex; gap: 0.75rem;">
+      <a href="/api/reports/export" class="btn btn-secondary">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+        Download Full CSV
+      </a>
+      <button class="btn btn-primary" onclick="window.print()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 6 2 18 2 18 9"></polyline><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path><rect x="6" y="14" width="12" height="8"></rect></svg>
+        Print Report
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Print-Only Official College Header -->
+<div class="print-header" style="display: none;">
+  <h2>AutoAttend — Institutional Attendance & Defaulter Report</h2>
+  <p>Prakash Institute of Engineering & Management (PIEMR) • Department of Computer Science & Engineering</p>
+  <hr style="margin: 1rem 0;">
+</div>
+
+<!-- Overall KPI Summary -->
+<div class="kpi-grid">
+  <div class="kpi-card">
+    <div class="kpi-info">
+      <span class="kpi-label">Total Registered</span>
+      <div id="report-total-students" class="kpi-value">--</div>
+    </div>
+    <div class="kpi-icon-wrap kpi-icon-indigo">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle></svg>
+    </div>
+  </div>
+
+  <div class="kpi-card">
+    <div class="kpi-info">
+      <span class="kpi-label">Present Today</span>
+      <div id="report-present-today" class="kpi-value" style="color: var(--success);">--</div>
+    </div>
+    <div class="kpi-icon-wrap kpi-icon-green">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg>
+    </div>
+  </div>
+
+  <div class="kpi-card">
+    <div class="kpi-info">
+      <span class="kpi-label">Absent Today</span>
+      <div id="report-absent-today" class="kpi-value" style="color: var(--danger);">--</div>
+    </div>
+    <div class="kpi-icon-wrap kpi-icon-red">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>
+    </div>
+  </div>
+
+  <div class="kpi-card">
+    <div class="kpi-info">
+      <span class="kpi-label">Average Compliance</span>
+      <div id="report-overall-rate" class="kpi-value" style="color: var(--primary);">--%</div>
+    </div>
+    <div class="kpi-icon-wrap kpi-icon-cyan">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
+    </div>
+  </div>
+</div>
+
+<!-- Subject-Wise Attendance Chart Card -->
+<div class="card">
+  <div class="card-header">
+    <div>
+      <h3 class="card-title">Subject-Wise Attendance Breakdown</h3>
+      <small>Overall attendance percentages by course curriculum</small>
+    </div>
+    <span class="badge badge-primary">Current Semester</span>
+  </div>
+  <div style="height: 300px; width: 100%;">
+    <canvas id="subjectAttendanceChart"></canvas>
+  </div>
+</div>
+
+<!-- Low Attendance Alert (<75%) Table -->
+<div class="card">
+  <div class="card-header">
+    <div>
+      <h3 class="card-title" style="color: var(--danger);">Low Attendance Defaulter Alerts (&lt; 75%)</h3>
+      <small>Students at risk of examination debarment per university minimum criteria</small>
+    </div>
+    <span class="badge badge-absent">Action Required</span>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Student Details</th>
+          <th>Section</th>
+          <th>Attended Classes</th>
+          <th>Attendance Rate</th>
+          <th>Warning Status</th>
+        </tr>
+      </thead>
+      <tbody id="low-attendance-tbody">
+        <!-- Loaded dynamically via reports.js -->
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/reports.js"></script>
+{% endblock %}

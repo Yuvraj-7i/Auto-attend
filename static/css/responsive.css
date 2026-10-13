@@ -1,0 +1,134 @@
+/* ==========================================================================
+   AutoAttend Responsive Styles & Print Stylesheets
+   ========================================================================== */
+
+/* Laptop & Medium Screens (< 1200px) */
+@media (max-width: 1200px) {
+  .charts-grid,
+  .dashboard-bottom-grid,
+  .camera-studio-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .camera-preview-container {
+    aspect-ratio: 16 / 9;
+  }
+}
+
+/* Tablet Screens (< 992px) */
+@media (max-width: 992px) {
+  .sidebar {
+    position: fixed;
+    height: 100vh;
+    transform: translateX(-100%);
+    box-shadow: var(--shadow-float);
+  }
+
+  .sidebar.mobile-open {
+    transform: translateX(0);
+  }
+
+  .topbar {
+    padding: 0 1.25rem;
+  }
+
+  .page-container {
+    padding: 1.25rem;
+  }
+
+  .hero-banner {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1.25rem;
+    padding: 1.75rem;
+  }
+
+  .hero-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+}
+
+/* Mobile Screens (< 768px) */
+@media (max-width: 768px) {
+  .kpi-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .search-input-wrap {
+    min-width: 100%;
+  }
+
+  .filter-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .camera-controls-bar {
+    flex-direction: column;
+    gap: 1rem;
+    align-items: stretch;
+  }
+
+  .modal-content {
+    width: 95%;
+    margin: 1rem;
+  }
+}
+
+/* Print Friendly Layout for Reports */
+@media print {
+  body {
+    background-color: #FFFFFF !important;
+    color: #000000 !important;
+  }
+
+  .sidebar,
+  .topbar,
+  .btn,
+  .filter-bar,
+  .pagination,
+  .no-print {
+    display: none !important;
+  }
+
+  .app-shell {
+    display: block !important;
+  }
+
+  .main-wrapper {
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  .page-container {
+    padding: 0 !important;
+    max-width: 100% !important;
+  }
+
+  .card {
+    border: 1px solid #CBD5E1 !important;
+    box-shadow: none !important;
+    break-inside: avoid;
+  }
+
+  .table {
+    border: 1px solid #000000 !important;
+  }
+
+  .table th, .table td {
+    border: 1px solid #CCCCCC !important;
+    color: #000000 !important;
+  }
+
+  .print-header {
+    display: block !important;
+    margin-bottom: 2rem;
+    text-align: center;
+  }
+}
