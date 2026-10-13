@@ -49,6 +49,7 @@ def list_students():
     offset = (page - 1) * per_page
     query_sql = f"""
         SELECT s.*,
+               (SELECT samples_count FROM face_templates ft WHERE ft.student_id = s.id) as face_samples,
                COUNT(ar.id) as total_sessions,
                SUM(CASE WHEN ar.status = 'present' THEN 1 ELSE 0 END) as present_sessions,
                ROUND(CAST(SUM(CASE WHEN ar.status = 'present' THEN 1 ELSE 0 END) AS FLOAT) /
@@ -246,6 +247,7 @@ def register_face(student_id):
 
     data = request.get_json() or {}
     image_base64 = data.get('image', '')
+    angle = (data.get('angle') or 'front').strip().lower()
 
     if not image_base64:
         return jsonify({"success": False, "message": "No image data provided for face registration."}), 400
@@ -261,7 +263,7 @@ def register_face(student_id):
         if frame is None:
             return jsonify({"success": False, "message": "Failed to decode camera image."}), 400
 
-        result = face_service.register_student_face(student_id, frame)
+        result = face_service.register_student_face(student_id, frame, angle=angle)
         if result["success"]:
             attendance_service.log_audit(
                 session.get('user_id'), "REGISTER_FACE", "students", student_id,
@@ -273,6 +275,34 @@ def register_face(student_id):
 
     except Exception as e:
         return jsonify({"success": False, "message": f"Face registration error: {str(e)}"}), 500
+
+@student_bp.route('/<int:student_id>/faces', methods=['GET'])
+@login_required
+def list_face_views(student_id):
+    """Returns which face angles are already saved, without the biometric vectors."""
+    student = fetch_one("SELECT id, full_name, face_registered FROM students WHERE id = %s", (student_id,))
+    if not student:
+        return jsonify({"success": False, "message": "Student not found"}), 404
+
+    row = fetch_one(
+        "SELECT embedding_data, samples_count FROM face_templates WHERE student_id = %s",
+        (student_id,)
+    )
+    angles = []
+    if row and row.get("embedding_data"):
+        for sample in face_service._load_samples(row["embedding_data"]):
+            angle = sample.get("angle") or "front"
+            angles.append({
+                "angle": angle,
+                "photo_url": f"/static/uploads/faces/student_{student_id}_{angle}.jpg"
+            })
+
+    return jsonify({
+        "success": True,
+        "face_registered": bool(student["face_registered"]),
+        "samples_count": len(angles),
+        "angles": angles
+    })
 
 @student_bp.route('/<int:student_id>/face', methods=['DELETE'])
 @login_required

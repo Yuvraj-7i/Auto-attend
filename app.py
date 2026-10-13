@@ -16,6 +16,12 @@ os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(os.path.join(Config.UPLOAD_FOLDER, "faces"), exist_ok=True)
 os.makedirs(os.path.join(app.root_path, "static", "images", "avatars"), exist_ok=True)
 
+@app.after_request
+def allow_camera(response):
+    """Lets the page ask for the webcam as soon as the user clicks Allow camera."""
+    response.headers["Permissions-Policy"] = "camera=(self), microphone=()"
+    return response
+
 # Register API blueprints
 app.register_blueprint(auth_bp)
 app.register_blueprint(student_bp)
@@ -96,9 +102,12 @@ if __name__ == '__main__':
     # Initialize database tables and seed data
     init_db()
     port = Config.PORT
-    print(f"==================================================")
-    print(f"  AutoAttend AI Attendance System running on:")
-    print(f"  http://127.0.0.1:{port}")
-    print(f"  Demo Credentials: teacher@autoattend.ai / password123")
-    print(f"==================================================")
-    app.run(host='0.0.0.0', port=port, debug=Config.DEBUG)
+    print("==================================================")
+    print("  AutoAttend is ready.")
+    print(f"  Open this address in the browser: http://127.0.0.1:{port}")
+    print("  Login: teacher@autoattend.ai")
+    print("  Password: password123")
+    print("  Use 127.0.0.1 so the browser can turn the camera on.")
+    print("==================================================")
+    # Reloader starts a second process and can lock the webcam.
+    app.run(host='0.0.0.0', port=port, debug=Config.DEBUG, use_reloader=False)

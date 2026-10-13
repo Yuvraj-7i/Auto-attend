@@ -91,46 +91,62 @@ async function checkCurrentCameraState() {
 
 async function startCameraCapture(demoModeRequested = false) {
   isDemoMode = demoModeRequested;
+  if (!demoModeRequested) {
+    const opened = await initBrowserWebcamFallback();
+    if (opened === true || opened === 'denied') return;
+    showToast('Camera did not start. Opening the practice view instead.', 'warning');
+    isDemoMode = true;
+  }
+
   try {
     const res = await fetch('/api/camera/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ camera_index: 0, demo_mode: isDemoMode })
+      body: JSON.stringify({ camera_index: 0, demo_mode: true })
     });
     const data = await res.json();
-
     if (data.success) {
-      updateCameraUI(true, data.is_demo_mode);
-      showToast(data.is_demo_mode ? 'Demo Simulation Mode Activated' : 'Classroom Camera Connected', 'success');
+      updateCameraUI(true, true);
+      showToast(demoModeRequested ? 'Practice view is on.' : 'Practice camera is on.', 'info');
       startEventsPolling();
-    } else {
-      // Fallback to browser webcam via getUserMedia
-      initBrowserWebcamFallback();
     }
   } catch (err) {
-    console.warn('Backend camera connection error. Initializing browser camera fallback...', err);
-    initBrowserWebcamFallback();
+    showToast('Camera could not start.', 'danger');
   }
 }
 
 async function initBrowserWebcamFallback() {
   try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('Open http://127.0.0.1:5000 to use the camera.');
+    }
     const videoEl = document.getElementById('browser-video-element');
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+    } catch (firstErr) {
+      if (firstErr && (firstErr.name === 'NotAllowedError' || firstErr.name === 'PermissionDeniedError')) throw firstErr;
+      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    }
     browserCamStream = stream;
     if (videoEl) {
       videoEl.srcObject = stream;
-      videoEl.play();
+      await videoEl.play();
       videoEl.style.display = 'block';
-      document.getElementById('camera-stream-img').style.display = 'none';
+      const feed = document.getElementById('camera-stream-img');
+      if (feed) feed.style.display = 'none';
     }
     updateCameraUI(true, false);
-    showToast('Browser Webcam Activated for AI Recognition', 'success');
+    showToast('Camera is on. Choose Allow if the browser asks.', 'success');
     startBrowserFrameStreaming();
+    return true;
   } catch (camErr) {
-    showToast('No physical camera accessible. Launching Demo Simulation Mode.', 'warning');
-    // Launch demo mode
-    startCameraCapture(true);
+    console.warn('Browser camera failed', camErr);
+    if (camErr && (camErr.name === 'NotAllowedError' || camErr.name === 'PermissionDeniedError')) {
+      showToast('Camera permission was blocked. Click the camera icon in the address bar and choose Allow.', 'danger');
+      return 'denied';
+    }
+    return false;
   }
 }
 
