@@ -1,3 +1,4 @@
+import os
 import cv2
 import time
 import math
@@ -47,8 +48,14 @@ class CameraService:
 
             if not self.is_demo_mode:
                 try:
-                    # Try opening specified camera index
-                    self.cap = cv2.VideoCapture(self.camera_index)
+                    # DirectShow is the reliable webcam backend on Windows.
+                    if os.name == "nt":
+                        self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+                    else:
+                        self.cap = cv2.VideoCapture(self.camera_index)
+                    if not self.cap.isOpened() and os.name == "nt":
+                        self.cap.release()
+                        self.cap = cv2.VideoCapture(self.camera_index)
                     if not self.cap.isOpened():
                         logger.warning("Could not open physical webcam index %s. Falling back to Demo Mode.", self.camera_index)
                         self.is_demo_mode = True

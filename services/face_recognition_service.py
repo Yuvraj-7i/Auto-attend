@@ -20,9 +20,14 @@ class FaceRecognitionService:
     - Labelled interactive Demo Mode simulation.
     """
 
+    FACE_ANGLES = ("front", "left", "right", "up", "down", "other")
+
     def __init__(self):
         self.cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
         self.face_cascade = cv2.CascadeClassifier(self.cascade_path)
+        self.profile_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + 'haarcascade_profileface.xml'
+        )
         if self.face_cascade.empty():
             logger.error("Failed to load OpenCV Haar Cascade from %s", self.cascade_path)
         else:
@@ -56,29 +61,88 @@ class FaceRecognitionService:
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         gray_clahe = clahe.apply(gray)
 
-        faces = self.face_cascade.detectMultiScale(
-            gray_clahe,
-            scaleFactor=1.1,
-            minNeighbors=4,
-            minSize=(36, 36),
-            flags=cv2.CASCADE_SCALE_IMAGE
-        )
+        faces = self._run_cascade(self.face_cascade, gray_clahe)
 
         # Fallback pass: standard global histogram equalization if primary pass found no face
         if len(faces) == 0:
             gray_eq = cv2.equalizeHist(gray)
-            faces = self.face_cascade.detectMultiScale(
-                gray_eq,
-                scaleFactor=1.1,
-                minNeighbors=3,
-                minSize=(30, 30),
-                flags=cv2.CASCADE_SCALE_IMAGE
-            )
+            faces = self._run_cascade(self.face_cascade, gray_eq, min_neighbors=3, min_size=(30, 30))
+
+        # Profile views (left/right) are missed by the frontal cascade.
+        if len(faces) == 0 and not self.profile_cascade.empty():
+            gray_eq = cv2.equalizeHist(gray)
+            faces = self._run_cascade(self.profile_cascade, gray_eq, min_neighbors=3, min_size=(30, 30))
+            if len(faces) == 0:
+                flipped = cv2.flip(gray_eq, 1)
+                flipped_faces = self._run_cascade(
+                    self.profile_cascade, flipped, min_neighbors=3, min_size=(30, 30)
+                )
+                img_w = proc_img.shape[1]
+                faces = [(img_w - x - w_box, y, w_box, h_box) for (x, y, w_box, h_box) in flipped_faces]
 
         if scale_ratio != 1.0:
             return [(int(x / scale_ratio), int(y / scale_ratio), int(w_box / scale_ratio), int(h_box / scale_ratio)) for (x, y, w_box, h_box) in faces]
 
         return [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
+
+    def _run_cascade(self, cascade, gray, min_neighbors=4, min_size=(36, 36)):
+        if cascade is None or cascade.empty():
+            return []
+        found = cascade.detectMultiScale(
+            gray,
+            scaleFactor=1.08,
+            minNeighbors=min_neighbors,
+            minSize=min_size,
+            flags=cv2.CASCADE_SCALE_IMAGE
+        )
+        if found is None or len(found) == 0:
+            return []
+        return [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in found]
+
+    def _largest_face(self, faces):
+        if not faces:
+            return None
+        return max(faces, key=lambda box: box[2] * box[3])
+
+    def _guided_center_crop(self, image_bgr):
+        """Uses the on-screen oval as the face when the detector misses an angled view."""
+        h_img, w_img = image_bgr.shape[:2]
+        side = int(min(h_img, w_img) * 0.62)
+        cx, cy = w_img // 2, int(h_img * 0.48)
+        x1 = max(0, cx - side // 2)
+        y1 = max(0, cy - int(side * 0.48))
+        x2 = min(w_img, x1 + side)
+        y2 = min(h_img, y1 + side)
+        crop = image_bgr[y1:y2, x1:x2]
+        return crop if crop.size else None
+
+    def _load_samples(self, embedding_data):
+        if not embedding_data:
+            return []
+        try:
+            data = json.loads(embedding_data)
+        except (TypeError, json.JSONDecodeError):
+            return []
+        if isinstance(data, list) and data and isinstance(data[0], (int, float)):
+            return [{"angle": "front", "embedding": data}]
+        if isinstance(data, dict):
+            samples = []
+            for sample in data.get("samples") or []:
+                if isinstance(sample, dict) and sample.get("embedding"):
+                    samples.append({
+                        "angle": sample.get("angle") or "front",
+                        "embedding": sample["embedding"]
+                    })
+            return samples
+        return []
+
+    def _best_similarity(self, embedding, stored_raw):
+        best = 0.0
+        for sample in self._load_samples(stored_raw):
+            sim = self.calculate_similarity(embedding, sample["embedding"])
+            if sim > best:
+                best = sim
+        return best
 
     def extract_face_embedding(self, face_bgr):
         """
@@ -159,64 +223,88 @@ class FaceRecognitionService:
         similarity = float(np.dot(vec1, vec2) / (norm1 * norm2))
         return max(0.0, min(1.0, (similarity + 1.0) / 2.0)) # Scaled to [0, 1]
 
-    def register_student_face(self, student_id: int, image_bgr):
+    def register_student_face(self, student_id: int, image_bgr, angle: str = "front"):
         """
-        Registers a consented student's face template.
-        Validates presence of a single distinct face, extracts embedding,
-        and saves securely to face_templates table.
+        Stores one face view for a student. Repeating the same angle replaces that view.
+        Several angles (front, left, right, up, down, other) are kept together.
         """
+        angle = (angle or "front").strip().lower()
+        if angle not in self.FACE_ANGLES:
+            angle = "other"
+
         faces = self.detect_faces(image_bgr)
-        if len(faces) == 0:
-            return {"success": False, "message": "No face detected in the image. Please face the camera directly."}
+        used_guide = False
         if len(faces) > 1:
-            return {"success": False, "message": "Multiple faces detected. Ensure only the student is in frame."}
+            # Keep the largest face so a busy background does not block enrollment.
+            faces = [self._largest_face(faces)]
 
-        x, y, w, h = faces[0]
-        # Add safety margin
-        pad = int(0.15 * max(w, h))
-        h_img, w_img = image_bgr.shape[:2]
-        x1 = max(0, x - pad)
-        y1 = max(0, y - pad)
-        x2 = min(w_img, x + w + pad)
-        y2 = min(h_img, y + h + pad)
+        if faces:
+            x, y, w, h = faces[0]
+            pad = int(0.15 * max(w, h))
+            h_img, w_img = image_bgr.shape[:2]
+            x1 = max(0, x - pad)
+            y1 = max(0, y - pad)
+            x2 = min(w_img, x + w + pad)
+            y2 = min(h_img, y + h + pad)
+            face_roi = image_bgr[y1:y2, x1:x2]
+        else:
+            face_roi = self._guided_center_crop(image_bgr)
+            used_guide = True
 
-        face_roi = image_bgr[y1:y2, x1:x2]
         embedding = self.extract_face_embedding(face_roi)
-
         if not embedding:
-            return {"success": False, "message": "Failed to extract face features. Try again with better lighting."}
+            return {
+                "success": False,
+                "message": "Could not read a face from this photo. Move closer, face the light, and try again."
+            }
 
-        # Save face thumbnail for UI
         upload_dir = os.path.join(Config.UPLOAD_FOLDER, "faces")
         os.makedirs(upload_dir, exist_ok=True)
-        avatar_rel_path = f"/static/uploads/faces/student_{student_id}.jpg"
-        avatar_abs_path = os.path.join(upload_dir, f"student_{student_id}.jpg")
-        cv2.imwrite(avatar_abs_path, cv2.resize(face_roi, (200, 200)))
+        angle_name = f"student_{student_id}_{angle}.jpg"
+        cv2.imwrite(os.path.join(upload_dir, angle_name), cv2.resize(face_roi, (200, 200)))
 
-        # Update or Insert face_template in DB
-        embedding_json = json.dumps(embedding)
-        existing = fetch_one("SELECT id FROM face_templates WHERE student_id = %s", (student_id,))
+        existing = fetch_one(
+            "SELECT embedding_data FROM face_templates WHERE student_id = %s",
+            (student_id,)
+        )
+        samples = self._load_samples(existing["embedding_data"]) if existing else []
+        samples = [sample for sample in samples if sample.get("angle") != angle]
+        samples.append({"angle": angle, "embedding": embedding})
+
+        embedding_json = json.dumps({"samples": samples})
         if existing:
             execute_query(
-                "UPDATE face_templates SET embedding_data = %s, samples_count = samples_count + 1 WHERE student_id = %s",
-                (embedding_json, student_id)
+                "UPDATE face_templates SET embedding_data = %s, samples_count = %s, model_name = %s WHERE student_id = %s",
+                (embedding_json, len(samples), "AutoAttend-MultiView-v1", student_id)
             )
         else:
             execute_query(
-                "INSERT INTO face_templates (student_id, embedding_data, model_name, samples_count) VALUES (%s, %s, %s, 1)",
-                (student_id, embedding_json, "AutoAttend-FeatureNet-v1")
+                "INSERT INTO face_templates (student_id, embedding_data, model_name, samples_count) VALUES (%s, %s, %s, %s)",
+                (student_id, embedding_json, "AutoAttend-MultiView-v1", len(samples))
             )
 
-        # Update student record
+        front_file = os.path.join(upload_dir, f"student_{student_id}_front.jpg")
+        avatar_file = os.path.join(upload_dir, f"student_{student_id}.jpg")
+        source_thumb = front_file if os.path.exists(front_file) else os.path.join(upload_dir, angle_name)
+        avatar_rel_path = f"/static/uploads/faces/student_{student_id}.jpg"
+        if os.path.exists(source_thumb):
+            cv2.imwrite(avatar_file, cv2.imread(source_thumb))
+
         execute_query(
             "UPDATE students SET face_registered = 1, avatar_url = %s WHERE id = %s",
             (avatar_rel_path, student_id)
         )
 
+        saved_angles = [sample["angle"] for sample in samples]
+        note = " Saved from the guide box because the face was at an angle." if used_guide else ""
         return {
             "success": True,
-            "message": "Face registered successfully and biometric template stored securely.",
-            "avatar_url": avatar_rel_path
+            "message": f"{angle.replace('_', ' ').title()} photo saved.{note}",
+            "angle": angle,
+            "samples_count": len(samples),
+            "saved_angles": saved_angles,
+            "avatar_url": avatar_rel_path,
+            "guided": used_guide
         }
 
     def remove_student_face(self, student_id: int):
@@ -229,14 +317,16 @@ class FaceRecognitionService:
             "UPDATE students SET face_registered = 0, avatar_url = '/static/images/avatars/default_avatar.png' WHERE id = %s",
             (student_id,)
         )
-        # Remove stored photo file if exists
-        avatar_abs_path = os.path.join(Config.UPLOAD_FOLDER, "faces", f"student_{student_id}.jpg")
-        if os.path.exists(avatar_abs_path):
-            try:
-                os.remove(avatar_abs_path)
-            except OSError:
-                pass
-        return {"success": True, "message": "Biometric template and face data permanently removed."}
+        faces_dir = os.path.join(Config.UPLOAD_FOLDER, "faces")
+        if os.path.isdir(faces_dir):
+            prefix = f"student_{student_id}"
+            for name in os.listdir(faces_dir):
+                if name.startswith(prefix) and name.lower().endswith((".jpg", ".jpeg", ".png")):
+                    try:
+                        os.remove(os.path.join(faces_dir, name))
+                    except OSError:
+                        pass
+        return {"success": True, "message": "All saved face photos for this student were removed."}
 
     def recognize_faces_in_frame(self, image_bgr, threshold: float = 0.65):
         """
@@ -276,8 +366,7 @@ class FaceRecognitionService:
             if embedding and templates:
                 for t in templates:
                     try:
-                        stored_emb = json.loads(t["embedding_data"])
-                        sim = self.calculate_similarity(embedding, stored_emb)
+                        sim = self._best_similarity(embedding, t["embedding_data"])
                         if sim > highest_sim:
                             highest_sim = sim
                             best_match = t

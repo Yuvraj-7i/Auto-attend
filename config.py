@@ -12,7 +12,7 @@ class Config:
     PORT = int(os.getenv("PORT", 5000))
 
     # Database settings
-    DB_TYPE = os.getenv("DB_TYPE", "mysql").lower()
+    DB_TYPE = os.getenv("DB_TYPE", "sqlite").lower()
     DB_HOST = os.getenv("DB_HOST", "localhost")
     DB_PORT = int(os.getenv("DB_PORT", 3306))
     DB_USER = os.getenv("DB_USER", "root")
