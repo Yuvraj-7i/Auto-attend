@@ -566,6 +566,7 @@
   cursor: not-allowed;
 }
 
+.badge-secondary { background: #F1F5F9; color: #475569; }
 .student-link { display: none; }
 body.role-student .staff-link { display: none; }
 body.role-student .student-link { display: flex; }
