@@ -11,9 +11,13 @@ let eventsPollingInterval = null;
 let browserCamStream = null;
 let browserFrameInterval = null;
 let isDemoMode = false;
+let enrolledStudents = [];
+let savedRecords = [];
+let latestDetections = [];
 
 document.addEventListener('DOMContentLoaded', () => {
   loadClassroomsAndSubjects();
+  loadEnrolledRoster();
   setupEventListeners();
   checkCurrentCameraState();
 });
@@ -65,6 +69,9 @@ function setupEventListeners() {
 
   // Start Attendance Session
   document.getElementById('btn-start-session')?.addEventListener('click', () => {
+    startAttendanceSession();
+  });
+  document.getElementById('btn-start-session-inline')?.addEventListener('click', () => {
     startAttendanceSession();
   });
 
@@ -172,11 +179,15 @@ function startBrowserFrameStreaming() {
       });
       const result = await res.json();
       if (result.success && result.detections) {
+        latestDetections = result.detections;
         updateStatsHUD({
           detected: result.detections.length,
           recognized: result.detections.filter(d => d.status === 'recognized').length,
-          pending: result.detections.filter(d => d.status === 'low_confidence').length
+          pending: result.detections.filter(d => d.status === 'low_confidence' || d.status === 'unknown').length
         });
+        renderRecognitionFeed(result.detections);
+        renderLiveRoster();
+        if (activeSessionId) loadSessionRecords();
       }
     } catch (e) {}
   }, 1500);
@@ -270,7 +281,8 @@ async function startAttendanceSession() {
       document.getElementById('session-subject-select').disabled = true;
 
       startSessionTimer();
-      showToast('Attendance Session Started! AI Face Matching active.', 'success');
+      showToast('Attendance session started. Recognized students are saved after 3 frames.', 'success');
+      document.getElementById('session-needed-note').style.display = 'none';
       loadSessionRecords();
     } else {
       showToast(data.message || 'Failed to start session', 'danger');
@@ -297,6 +309,8 @@ async function endAttendanceSession() {
 
         showSessionSummaryModal(data);
         activeSessionId = null;
+        savedRecords = [];
+        renderLiveRoster();
       }
     } catch (e) {
       showToast('Error ending session', 'danger');
@@ -328,8 +342,10 @@ function startEventsPolling() {
       const res = await fetch('/api/camera/events');
       const data = await res.json();
       if (data.success) {
-        updateStatsHUD(data.stats);
-        renderLiveEvents(data.events);
+        if (!browserCamStream) {
+          updateStatsHUD(data.stats);
+          renderLiveEvents(data.events);
+        }
         if (activeSessionId) {
           loadSessionRecords();
         }
@@ -352,6 +368,150 @@ function updateStatsHUD(stats) {
   if (detEl) detEl.textContent = stats.detected || 0;
   if (recEl) recEl.textContent = stats.recognized || 0;
   if (pendEl) pendEl.textContent = stats.pending || 0;
+}
+
+async function loadEnrolledRoster() {
+  try {
+    const res = await fetch('/api/students?per_page=100&face_status=registered');
+    const data = await res.json();
+    enrolledStudents = data.students || [];
+    renderLiveRoster();
+  } catch (err) {
+    console.error('Failed to load enrolled students', err);
+  }
+}
+
+function renderRecognitionFeed(detections) {
+  const container = document.getElementById('live-events-scroll');
+  const note = document.getElementById('session-needed-note');
+  if (!container) return;
+  const recognized = (detections || []).filter(d => d.student_id);
+  if (note) note.style.display = recognized.length && !activeSessionId ? 'block' : 'none';
+  if (!detections || detections.length === 0) {
+    container.innerHTML = `<div class="empty-state" style="padding: 1rem;"><small>No face in this frame yet.</small></div>`;
+    return;
+  }
+  container.innerHTML = detections.map(det => {
+    const name = det.full_name || 'Unknown face';
+    const roll = det.roll_number && det.roll_number !== 'N/A' ? det.roll_number : '';
+    const confidence = Math.round((det.confidence || 0) * 100);
+    let detail = 'Not enrolled';
+    if (det.status === 'recognized') {
+      detail = det.is_marked
+        ? 'Marked present'
+        : (activeSessionId ? `Saving attendance · frame ${det.observations || 1} of 3` : 'Recognized · start the session to save attendance');
+    } else if (det.status === 'low_confidence') {
+      detail = 'Uncertain match · needs review';
+    }
+    return `
+      <div class="event-entry ${det.status === 'recognized' ? 'success' : 'warning'}">
+        <div style="display:flex; justify-content:space-between; margin-bottom: 2px;">
+          <strong style="color:var(--text-heading);">${name}${roll ? ` · ${roll}` : ''}</strong>
+          <small style="color:var(--text-muted);">${confidence}%</small>
+        </div>
+        <span style="font-size:0.75rem; color:var(--text-muted);">${detail}</span>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderLiveRoster() {
+  const tbody = document.getElementById('live-student-table-body');
+  if (!tbody) return;
+  const rows = new Map();
+  enrolledStudents.forEach(student => {
+    rows.set(student.id, {
+      id: student.id,
+      record_id: null,
+      full_name: student.full_name,
+      roll_number: student.roll_number,
+      avatar_url: student.avatar_url,
+      status: 'not_seen',
+      confidence_score: 0,
+      repeated_observations: 0
+    });
+  });
+  latestDetections.forEach(det => {
+    if (!det.student_id) return;
+    const row = rows.get(det.student_id) || {
+      id: det.student_id,
+      record_id: null,
+      full_name: det.full_name,
+      roll_number: det.roll_number,
+      avatar_url: det.avatar_url,
+      status: 'not_seen',
+      confidence_score: 0,
+      repeated_observations: 0
+    };
+    row.full_name = det.full_name || row.full_name;
+    row.roll_number = det.roll_number || row.roll_number;
+    row.confidence_score = det.confidence || 0;
+    row.repeated_observations = det.observations || row.repeated_observations || 1;
+    if (det.status === 'recognized') row.status = det.is_marked ? 'present' : 'scanning';
+    else if (det.status === 'low_confidence') row.status = 'needs_review';
+    rows.set(det.student_id, row);
+  });
+  savedRecords.forEach(record => {
+    const row = rows.get(record.student_id) || {
+      id: record.student_id,
+      full_name: record.full_name,
+      roll_number: record.roll_number,
+      avatar_url: record.avatar_url,
+      confidence_score: 0,
+      repeated_observations: 0
+    };
+    row.record_id = record.id;
+    row.full_name = record.full_name || row.full_name;
+    row.roll_number = record.roll_number || row.roll_number;
+    row.confidence_score = record.confidence_score || row.confidence_score;
+    row.repeated_observations = record.repeated_observations || row.repeated_observations;
+    if (['present', 'late', 'absent', 'approved_leave'].includes(record.status)) row.status = record.status;
+    rows.set(record.student_id, row);
+  });
+
+  const order = { present: 0, late: 1, scanning: 2, needs_review: 3, not_seen: 4, absent: 5, approved_leave: 6 };
+  const list = [...rows.values()].sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || a.full_name.localeCompare(b.full_name));
+  if (!list.length) {
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:2rem; color:var(--text-muted);">No enrolled students have a registered face yet.</td></tr>`;
+    return;
+  }
+  const labels = {
+    present: ['badge-present', 'PRESENT'],
+    late: ['badge-late', 'LATE'],
+    scanning: ['badge-ai', 'IN FRAME'],
+    needs_review: ['badge-late', 'REVIEW'],
+    not_seen: ['badge-secondary', 'NOT IN FRAME'],
+    absent: ['badge-absent', 'ABSENT'],
+    approved_leave: ['badge-primary', 'LEAVE']
+  };
+  tbody.innerHTML = list.map(row => {
+    const [badge, label] = labels[row.status] || ['badge-secondary', row.status];
+    const confidence = row.confidence_score ? `${Math.round(row.confidence_score * 100)}%` : '—';
+    const frames = row.repeated_observations ? `${row.repeated_observations} frames` : '—';
+    const edit = row.record_id
+      ? `<button class="btn btn-sm btn-secondary" onclick="openManualEditModal(${row.record_id}, '${row.status}', '${row.full_name.replace(/'/g, '')}')">Edit</button>`
+      : '—';
+    return `
+      <tr>
+        <td>
+          <div style="display:flex; align-items:center; gap:0.625rem;">
+            <img src="${row.avatar_url || '/static/images/avatars/default_avatar.png'}" style="width:32px; height:32px; border-radius:50%; object-fit:cover;" onerror="this.src='/static/images/avatars/default_avatar.png'">
+            <div>
+              <div style="font-weight:600; color:var(--text-heading);">${row.full_name}</div>
+              <small>${row.roll_number || ''}</small>
+            </div>
+          </div>
+        </td>
+        <td><span class="badge ${badge}">${label}</span></td>
+        <td><b>${confidence}</b></td>
+        <td>${frames}</td>
+        <td>${edit}</td>
+      </tr>
+    `;
+  }).join('');
+  const presentCount = list.filter(row => row.status === 'present' || row.status === 'late').length;
+  const presentEl = document.getElementById('stat-present-count');
+  if (presentEl) presentEl.textContent = presentCount;
 }
 
 function renderLiveEvents(events) {
@@ -382,9 +542,8 @@ async function loadSessionRecords() {
     const res = await fetch(`/api/attendance/sessions/${activeSessionId}`);
     const data = await res.json();
     if (data.success && data.records) {
-      renderSessionStudentTable(data.records);
-      const presEl = document.getElementById('stat-present-count');
-      if (presEl && data.metrics) presEl.textContent = data.metrics.present;
+      savedRecords = data.records;
+      renderLiveRoster();
     }
   } catch (e) {}
 }
