@@ -21,6 +21,9 @@ class FaceRecognitionService:
     """
 
     FACE_ANGLES = ("front", "left", "right", "up", "down", "other")
+    IDENTITY_MODEL = "AutoAttend-Identity-v2"
+    # A match is kept only when the correct student is clearly ahead of the next student.
+    IDENTITY_MARGIN = 0.08
 
     def __init__(self):
         self.cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
@@ -36,6 +39,7 @@ class FaceRecognitionService:
         # In-memory accumulator for active session observations:
         # structure: { session_id: { student_id: { 'count': int, 'confidences': list } } }
         self._session_observations = {}
+        self._templates_refreshed = False
 
     def detect_faces(self, image_bgr, group=False):
         """
@@ -159,74 +163,127 @@ class FaceRecognitionService:
             return samples
         return []
 
+    def _raw_cosine(self, embedding1, embedding2):
+        if not embedding1 or not embedding2 or len(embedding1) != len(embedding2):
+            return -1.0
+        vec1 = np.array(embedding1, dtype=np.float32)
+        vec2 = np.array(embedding2, dtype=np.float32)
+        norm1 = np.linalg.norm(vec1)
+        norm2 = np.linalg.norm(vec2)
+        if norm1 < 1e-6 or norm2 < 1e-6:
+            return -1.0
+        return float(np.dot(vec1, vec2) / (norm1 * norm2))
+
     def _best_similarity(self, embedding, stored_raw):
-        best = 0.0
+        best = -1.0
         for sample in self._load_samples(stored_raw):
-            sim = self.calculate_similarity(embedding, sample["embedding"])
+            sim = self._raw_cosine(embedding, sample["embedding"])
             if sim > best:
                 best = sim
         return best
 
+    def _rank_templates(self, embedding, templates):
+        ranked = []
+        for template in templates:
+            try:
+                sim = self._best_similarity(embedding, template["embedding_data"])
+            except Exception as exc:
+                logger.error("Error comparing template: %s", exc)
+                continue
+            ranked.append((sim, template))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return ranked
+
+    def _decision(self, ranked, threshold):
+        """Returns the student only when they are clearly ahead of everyone else."""
+        if not ranked:
+            return None, 0.0, "unknown"
+        best_sim, best = ranked[0]
+        second_sim = ranked[1][0] if len(ranked) > 1 else -1.0
+        margin = best_sim - second_sim
+        if best_sim >= threshold and margin >= self.IDENTITY_MARGIN:
+            return best, best_sim, "recognized"
+        if best_sim >= max(0.5, threshold - 0.12):
+            return best, best_sim, "low_confidence"
+        return None, best_sim if best_sim > 0 else 0.0, "unknown"
+
     def extract_face_embedding(self, face_bgr):
         """
-        Generates a robust, normalized 256-dimensional feature vector from a face crop.
-        Combines spatial intensity grids and gradient magnitude descriptors with L2 normalization.
+        Builds an identity signature from the inner face.
+        Brightness is removed so two different students no longer look alike.
         """
         if face_bgr is None or face_bgr.size == 0:
             return None
+        height, width = face_bgr.shape[:2]
+        if height < 20 or width < 20:
+            return None
 
-        # Standardize face dimensions
-        target_size = (112, 112)
-        resized = cv2.resize(face_bgr, target_size, interpolation=cv2.INTER_AREA)
-        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-        equalized = cv2.equalizeHist(gray)
+        y1, y2 = int(height * 0.12), int(height * 0.88)
+        x1, x2 = int(width * 0.08), int(width * 0.92)
+        crop = face_bgr[y1:y2, x1:x2]
+        if crop.size == 0:
+            crop = face_bgr
 
-        # 1. Spatial 8x8 block average intensities (64 dimensions)
-        h, w = equalized.shape
-        block_h, block_w = h // 8, w // 8
-        grid_features = []
-        for i in range(8):
-            for j in range(8):
-                cell = equalized[i * block_h:(i + 1) * block_h, j * block_w:(j + 1) * block_w]
-                grid_features.append(np.mean(cell))
+        gray = cv2.cvtColor(cv2.resize(crop, (48, 48)), cv2.COLOR_BGR2GRAY)
+        gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4)).apply(gray).astype(np.float32)
+        gray = (gray - gray.mean()) / (gray.std() + 1e-6)
+        shape = gray.flatten()
+        shape = shape / (np.linalg.norm(shape) + 1e-6)
 
-        # 2. Sobel edge gradients (direction & magnitude, 128 dimensions)
-        grad_x = cv2.Sobel(equalized, cv2.CV_32F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(equalized, cv2.CV_32F, 0, 1, ksize=3)
-        mag, _ = cv2.cartToPolar(grad_x, grad_y)
+        hsv = cv2.cvtColor(cv2.resize(crop, (24, 24)), cv2.COLOR_BGR2HSV).astype(np.float32)
+        hsv[:, :, 0] /= 180.0
+        hsv[:, :, 1] /= 255.0
+        hsv[:, :, 2] /= 255.0
+        color = hsv.reshape(-1)
+        color = (color - color.mean()) / (color.std() + 1e-6)
+        color = color / (np.linalg.norm(color) + 1e-6)
 
-        grad_features = []
-        for i in range(8):
-            for j in range(8):
-                cell_mag = mag[i * block_h:(i + 1) * block_h, j * block_w:(j + 1) * block_w]
-                grad_features.append(np.mean(cell_mag))
-                grad_features.append(np.std(cell_mag))
+        combined = np.concatenate([shape * 0.75, color * 0.25]).astype(np.float32)
+        combined = combined / (np.linalg.norm(combined) + 1e-6)
+        return combined.tolist()
 
-        # 3. Concentric ring radial variance (64 dimensions)
-        center_y, center_x = h // 2, w // 2
-        radial_features = []
-        y_indices, x_indices = np.indices(equalized.shape)
-        distances = np.sqrt((x_indices - center_x) ** 2 + (y_indices - center_y) ** 2)
-        max_dist = np.sqrt(center_x ** 2 + center_y ** 2)
-        bins = np.linspace(0, max_dist, 65)
-        for b in range(64):
-            mask = (distances >= bins[b]) & (distances < bins[b + 1])
-            if np.any(mask):
-                radial_features.append(np.mean(equalized[mask]))
+    def refresh_saved_templates(self):
+        """Rebuilds stored signatures from the saved face photos after the matcher changes."""
+        if self._templates_refreshed:
+            return
+        self._templates_refreshed = True
+        folder = os.path.join(Config.UPLOAD_FOLDER, "faces")
+        if not os.path.isdir(folder):
+            return
+        grouped = {}
+        for name in os.listdir(folder):
+            if not name.startswith("student_") or not name.lower().endswith(".jpg"):
+                continue
+            stem = name[:-4]
+            parts = stem.split("_")
+            if len(parts) < 3 or not parts[1].isdigit():
+                continue
+            angle = parts[2].lower()
+            if angle not in self.FACE_ANGLES:
+                continue
+            grouped.setdefault(int(parts[1]), []).append((angle, os.path.join(folder, name)))
+
+        for student_id, views in grouped.items():
+            samples = []
+            for angle, path in views:
+                image = cv2.imread(path)
+                embedding = self.extract_face_embedding(image)
+                if embedding:
+                    samples.append({"angle": angle, "embedding": embedding})
+            if not samples:
+                continue
+            payload = json.dumps({"samples": samples})
+            existing = fetch_one("SELECT id FROM face_templates WHERE student_id = %s", (student_id,))
+            if existing:
+                execute_query(
+                    "UPDATE face_templates SET embedding_data = %s, samples_count = %s, model_name = %s WHERE student_id = %s",
+                    (payload, len(samples), self.IDENTITY_MODEL, student_id)
+                )
             else:
-                radial_features.append(0.0)
-
-        # Combine into a unified vector
-        combined = np.array(grid_features + grad_features + radial_features, dtype=np.float32)
-
-        # L2-normalization for cosine similarity
-        norm = np.linalg.norm(combined)
-        if norm > 1e-6:
-            normalized = combined / norm
-        else:
-            normalized = combined
-
-        return normalized.tolist()
+                execute_query(
+                    "INSERT INTO face_templates (student_id, embedding_data, model_name, samples_count) VALUES (%s, %s, %s, %s)",
+                    (student_id, payload, self.IDENTITY_MODEL, len(samples))
+                )
 
     def calculate_similarity(self, embedding1, embedding2):
         """
@@ -291,19 +348,22 @@ class FaceRecognitionService:
             (student_id,)
         )
         samples = self._load_samples(existing["embedding_data"]) if existing else []
-        samples = [sample for sample in samples if sample.get("angle") != angle]
+        samples = [
+            sample for sample in samples
+            if sample.get("angle") != angle and len(sample.get("embedding") or []) == len(embedding)
+        ]
         samples.append({"angle": angle, "embedding": embedding})
 
         embedding_json = json.dumps({"samples": samples})
         if existing:
             execute_query(
                 "UPDATE face_templates SET embedding_data = %s, samples_count = %s, model_name = %s WHERE student_id = %s",
-                (embedding_json, len(samples), "AutoAttend-MultiView-v1", student_id)
+                (embedding_json, len(samples), self.IDENTITY_MODEL, student_id)
             )
         else:
             execute_query(
                 "INSERT INTO face_templates (student_id, embedding_data, model_name, samples_count) VALUES (%s, %s, %s, %s)",
-                (student_id, embedding_json, "AutoAttend-MultiView-v1", len(samples))
+                (student_id, embedding_json, self.IDENTITY_MODEL, len(samples))
             )
 
         front_file = os.path.join(upload_dir, f"student_{student_id}_front.jpg")
@@ -370,7 +430,7 @@ class FaceRecognitionService:
         if not bboxes:
             return []
 
-        # Load all enrolled templates from database
+        self.refresh_saved_templates()
         templates = fetch_all("""
             SELECT ft.student_id, ft.embedding_data, s.full_name, s.roll_number, s.avatar_url
             FROM face_templates ft
@@ -378,53 +438,55 @@ class FaceRecognitionService:
             WHERE s.consent_given = 1;
         """)
 
-        results = []
+        pending = []
         for (x, y, w, h) in bboxes:
-            face_roi = image_bgr[y:y+h, x:x+w]
+            face_roi = image_bgr[y:y + h, x:x + w]
             embedding = self.extract_face_embedding(face_roi)
-
-            best_match = None
-            highest_sim = 0.0
-
-            if embedding and templates:
-                for t in templates:
-                    try:
-                        sim = self._best_similarity(embedding, t["embedding_data"])
-                        if sim > highest_sim:
-                            highest_sim = sim
-                            best_match = t
-                    except Exception as e:
-                        logger.error("Error comparing template: %s", str(e))
-
-            if best_match and highest_sim >= threshold:
-                status = "recognized"
-                student_id = best_match["student_id"]
-                full_name = best_match["full_name"]
-                roll_number = best_match["roll_number"]
-                avatar_url = best_match["avatar_url"]
-            elif best_match and highest_sim >= (threshold - 0.15):
-                status = "low_confidence"
-                student_id = best_match["student_id"]
-                full_name = best_match["full_name"] + " (Verify)"
-                roll_number = best_match["roll_number"]
-                avatar_url = best_match["avatar_url"]
-            else:
-                status = "unknown"
-                student_id = None
-                full_name = "Unknown Face"
-                roll_number = "N/A"
-                avatar_url = "/static/images/avatars/default_avatar.png"
-
-            results.append({
+            ranked = self._rank_templates(embedding, templates) if embedding else []
+            match, score, status = self._decision(ranked, threshold)
+            pending.append({
                 "bbox": [x, y, w, h],
+                "match": match,
+                "score": score,
+                "status": status
+            })
+
+        # One student can own only the strongest face in this frame.
+        pending.sort(key=lambda item: item["score"], reverse=True)
+        claimed = set()
+        results = []
+        for item in pending:
+            match = item["match"]
+            status = item["status"]
+            student_id = None
+            full_name = "Unknown Face"
+            roll_number = "N/A"
+            avatar_url = "/static/images/avatars/default_avatar.png"
+            if match and status == "recognized":
+                if match["student_id"] in claimed:
+                    status = "low_confidence"
+                    full_name = match["full_name"] + " (Duplicate)"
+                    roll_number = match["roll_number"]
+                    avatar_url = match["avatar_url"]
+                else:
+                    claimed.add(match["student_id"])
+                    student_id = match["student_id"]
+                    full_name = match["full_name"]
+                    roll_number = match["roll_number"]
+                    avatar_url = match["avatar_url"]
+            elif match and status == "low_confidence":
+                full_name = match["full_name"] + " (Verify)"
+                roll_number = match["roll_number"]
+                avatar_url = match["avatar_url"]
+            results.append({
+                "bbox": item["bbox"],
                 "student_id": student_id,
                 "full_name": full_name,
                 "roll_number": roll_number,
                 "avatar_url": avatar_url,
-                "confidence": round(highest_sim, 2),
+                "confidence": round(float(item["score"]), 2),
                 "status": status
             })
-
         return results
 
     def accumulate_observation(self, session_id: int, student_id: int, confidence: float, min_observations: int = 3):
@@ -490,6 +552,7 @@ class FaceRecognitionService:
         The same student is kept once; extra detections are marked duplicate.
         """
         boxes = self.detect_faces(image_bgr, group=True)
+        self.refresh_saved_templates()
         templates = fetch_all(
             """
             SELECT ft.student_id, ft.embedding_data, s.full_name, s.roll_number, s.student_id AS enrollment_no
@@ -503,29 +566,21 @@ class FaceRecognitionService:
         for (x, y, w, h) in boxes:
             roi = image_bgr[y:y + h, x:x + w]
             embedding = self.extract_face_embedding(roi)
-            best = None
-            best_sim = 0.0
-            if embedding:
-                for template in templates:
-                    sim = self._best_similarity(embedding, template["embedding_data"])
-                    if sim > best_sim:
-                        best_sim = sim
-                        best = template
-            review_floor = max(0.45, threshold - review_margin)
-            if best and best_sim >= threshold:
+            ranked = self._rank_templates(embedding, templates) if embedding else []
+            best, best_sim, status = self._decision(ranked, threshold)
+            if status == "recognized":
                 result = "matched"
-            elif best and best_sim >= review_floor:
+            elif status == "low_confidence":
                 result = "needs_review"
             else:
                 result = "unmatched"
                 best = None
-                best_sim = best_sim if best_sim else 0.0
             detections.append({
                 "bbox": [int(x), int(y), int(w), int(h)],
                 "student_id": best["student_id"] if best else None,
                 "full_name": best["full_name"] if best else None,
                 "roll_number": best["roll_number"] if best else None,
-                "confidence": round(float(best_sim), 3),
+                "confidence": round(max(float(best_sim), 0.0), 3),
                 "match_result": result
             })
 
