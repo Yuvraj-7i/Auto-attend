@@ -1,32 +1,55 @@
 let slots = [];
+let queue = 'waiting';
+let records = [];
 
 document.addEventListener('DOMContentLoaded', async () => {
   const today = new Date().toISOString().slice(0, 10);
   document.getElementById('checkin-date').value = today;
-  document.getElementById('filter-date').value = today;
+
   const res = await fetch('/api/meta/options');
   const data = await res.json();
   slots = data.lecture_slots || [];
-  document.getElementById('slot-id').innerHTML = slots.map(s => `<option value="${s.id}">${s.class_section} · ${s.title}</option>`).join('');
-  document.getElementById('checkin-student').innerHTML = data.students.map(s => `<option value="${s.id}">${s.full_name} · ${s.roll_number}</option>`).join('');
-  document.getElementById('checkin-subject').innerHTML = data.subjects.map(s => `<option value="${s.id}">${s.subject_code}</option>`).join('');
-  document.getElementById('filter-class').innerHTML += data.class_sections.map(c => `<option value="${c}">${c}</option>`).join('');
-  document.getElementById('filter-subject').innerHTML += data.subjects.map(s => `<option value="${s.id}">${s.subject_code}</option>`).join('');
-  document.getElementById('filter-student').innerHTML += data.students.map(s => `<option value="${s.id}">${s.full_name}</option>`).join('');
+  fillSelect('slot-id', slots.map(s => `<option value="${s.id}">${esc(s.class_section)} · ${esc(s.title)}</option>`));
+  fillSelect('checkin-student', (data.students || []).map(s => `<option value="${s.id}">${esc(s.full_name)} · ${esc(s.roll_number)}</option>`));
+  fillSelect('checkin-subject', (data.subjects || []).map(s => `<option value="${s.id}">${esc(s.subject_name || s.subject_code)}</option>`));
+  document.getElementById('filter-class').insertAdjacentHTML('beforeend', (data.class_sections || []).map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join(''));
+  document.getElementById('filter-subject').insertAdjacentHTML('beforeend', (data.subjects || []).map(s => `<option value="${s.id}">${esc(s.subject_name || s.subject_code)}</option>`).join(''));
+
   applySlot();
   document.getElementById('slot-id').onchange = applySlot;
   document.getElementById('slot-form').onsubmit = saveSlot;
   document.getElementById('checkin-form').onsubmit = checkIn;
-  document.getElementById('filter-btn').onclick = () => loadLate();
-  document.getElementById('daily-report').onclick = (e) => { e.preventDefault(); document.getElementById('filter-month').value = ''; loadLate(); };
-  document.getElementById('monthly-report').onclick = (e) => {
-    e.preventDefault();
+  document.getElementById('open-add').onclick = () => {
+    const panel = document.getElementById('add-panel');
+    panel.hidden = !panel.hidden;
+    if (!panel.hidden) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  document.querySelectorAll('.stat-chip').forEach(chip => {
+    chip.onclick = () => {
+      queue = chip.dataset.queue;
+      document.querySelectorAll('.stat-chip').forEach(item => item.classList.toggle('is-active', item === chip));
+      render();
+    };
+  });
+  ['filter-date', 'filter-class', 'filter-subject'].forEach(id => {
+    document.getElementById(id).onchange = loadLate;
+  });
+  document.getElementById('clear-date').onclick = () => {
     document.getElementById('filter-date').value = '';
-    if (!document.getElementById('filter-month').value) document.getElementById('filter-month').value = today.slice(0, 7);
     loadLate();
   };
   loadLate();
 });
+
+function fillSelect(id, html) {
+  document.getElementById(id).innerHTML = html.join('');
+}
+
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[ch]));
+}
 
 function applySlot() {
   const slot = slots.find(item => String(item.id) === document.getElementById('slot-id').value);
@@ -47,7 +70,7 @@ async function saveSlot(event) {
     })
   });
   const data = await res.json();
-  showToast(data.success ? 'Lecture timing saved' : (data.message || 'Could not save'), data.success ? 'success' : 'danger');
+  showToast(data.success ? 'Class timing saved' : (data.message || 'Could not save'), data.success ? 'success' : 'danger');
 }
 
 async function checkIn(event) {
@@ -63,46 +86,108 @@ async function checkIn(event) {
     })
   });
   const data = await res.json();
-  showToast(data.message || (data.late ? `${data.minutes_late} minutes late` : 'Recorded'), data.success ? 'success' : 'danger');
-  if (data.success) loadLate();
+  showToast(data.message || (data.late ? 'Student flagged as late' : 'Not flagged'), data.success ? 'success' : 'danger');
+  if (data.success && data.late) {
+    queue = 'waiting';
+    document.querySelectorAll('.stat-chip').forEach(item => item.classList.toggle('is-active', item.dataset.queue === 'waiting'));
+    loadLate();
+  }
 }
 
 async function loadLate() {
-  const params = new URLSearchParams();
+  const params = new URLSearchParams({ queue: 'all' });
   const date = document.getElementById('filter-date').value;
-  const month = document.getElementById('filter-month').value;
   if (date) params.set('date', date);
-  if (month) params.set('month', month);
-  ['class', 'subject', 'student'].forEach(key => {
-    const value = document.getElementById(`filter-${key}`).value;
-    if (value) params.set(key === 'class' ? 'class_section' : key === 'subject' ? 'subject_id' : 'student_id', value);
-  });
+  const classSection = document.getElementById('filter-class').value;
+  const subject = document.getElementById('filter-subject').value;
+  if (classSection) params.set('class_section', classSection);
+  if (subject) params.set('subject_id', subject);
   const res = await fetch(`/api/late?${params}`);
   const data = await res.json();
-  document.getElementById('late-body').innerHTML = (data.records || []).map(row => `
-    <tr>
-      <td>${row.full_name}<br><small>${row.roll_number}</small></td>
-      <td>${row.class_section}</td>
-      <td>${row.subject_code}</td>
-      <td>${row.arrival_time}</td>
-      <td>${row.minutes_late}</td>
-      <td>
-        <input type="datetime-local" id="fix-${row.id}">
-        <input placeholder="Why this change" id="note-${row.id}">
-        <button class="btn btn-sm btn-secondary" type="button" onclick="correctLate(${row.id})">Save</button>
-        <small>${row.correction_note || ''}</small>
-      </td>
-    </tr>
-  `).join('') || '<tr><td colspan="6">No late arrivals for this filter.</td></tr>';
+  records = data.records || [];
+  document.getElementById('count-waiting').textContent = records.filter(isWaiting).length;
+  document.getElementById('count-done').textContent = records.filter(row => !isWaiting(row)).length;
+  render();
 }
 
-async function correctLate(id) {
-  const res = await fetch(`/api/late/${id}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ arrival_time: document.getElementById(`fix-${id}`).value, note: document.getElementById(`note-${id}`).value })
+function isWaiting(row) {
+  return !row.review_status || row.review_status === 'pending';
+}
+
+function render() {
+  const list = document.getElementById('late-list');
+  const shown = records.filter(row => queue === 'done' ? !isWaiting(row) : isWaiting(row));
+  if (!shown.length) {
+    list.innerHTML = `
+      <div class="late-empty">
+        <h2>${queue === 'waiting' ? 'No late students waiting' : 'No decisions yet'}</h2>
+        <p>${queue === 'waiting' ? 'When a student arrives after the grace time, they show up here with a flag.' : 'Decisions you make will stay in this list.'}</p>
+      </div>`;
+    return;
+  }
+  list.innerHTML = shown.map(cardHtml).join('');
+}
+
+function cardHtml(row) {
+  const waiting = isWaiting(row);
+  const status = statusLabel(row.review_status);
+  const when = formatWhen(row.arrival_time);
+  return `
+    <article class="late-card ${waiting ? 'is-flagged' : 'is-done'}">
+      <div class="late-card-top">
+        ${waiting ? '<span class="flag">Flagged</span>' : `<span class="decision decision-${esc(row.review_status)}">${esc(status)}</span>`}
+        <span class="late-minutes">${esc(lateLabel(row.minutes_late))}</span>
+      </div>
+      <h2>${esc(row.full_name)}</h2>
+      <p class="late-meta">${esc(row.roll_number)} · ${esc(row.class_section)} · ${esc(row.subject_name || row.subject_code)}</p>
+      <p class="late-time">Arrived ${esc(when)} · class started ${esc(String(row.lecture_start || '').slice(0, 5))} · grace ${row.grace_minutes} min</p>
+      ${waiting ? actions(row.id) : `<p class="late-note">Saved as ${esc(status)}. ${esc(row.decision_note || '')}</p>${actions(row.id, true)}`}
+    </article>`;
+}
+
+function actions(id, compact) {
+  const size = compact ? ' btn-sm' : '';
+  return `
+    <div class="late-actions">
+      <button class="btn btn-present${size}" type="button" onclick="decideLate(${id}, 'present')">Present</button>
+      <button class="btn btn-absent${size}" type="button" onclick="decideLate(${id}, 'absent')">Absent</button>
+      <button class="btn btn-leave${size}" type="button" onclick="decideLate(${id}, 'leave')">Leave</button>
+    </div>`;
+}
+
+function statusLabel(status) {
+  if (status === 'present') return 'Present';
+  if (status === 'absent') return 'Absent';
+  if (status === 'approved_leave') return 'Leave';
+  return 'Waiting';
+}
+
+function lateLabel(minutes) {
+  const value = Number(minutes) || 0;
+  if (value < 60) return `${value} min late`;
+  const hours = Math.floor(value / 60);
+  const rest = value % 60;
+  return rest ? `${hours} hr ${rest} min late` : `${hours} hr late`;
+}
+
+function formatWhen(value) {
+  if (!value) return 'unknown time';
+  const text = String(value).replace('T', ' ');
+  return text.length > 16 ? text.slice(0, 16) : text;
+}
+
+async function decideLate(id, status) {
+  const words = { present: 'present', absent: 'absent', leave: 'on leave' };
+  const row = records.find(item => item.id === id);
+  const name = row ? row.full_name : 'this student';
+  confirmDialog('Save attendance', `Mark ${name} as ${words[status]}?`, 'Save', async () => {
+    const res = await fetch(`/api/late/${id}/decision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status })
+    });
+    const data = await res.json();
+    showToast(data.message || 'Saved', data.success ? 'success' : 'danger');
+    if (data.success) loadLate();
   });
-  const data = await res.json();
-  showToast(data.message || 'Updated', data.success ? 'success' : 'danger');
-  if (data.success) loadLate();
 }
