@@ -416,6 +416,11 @@ def confirm_batch(batch_id, teacher_id, updates):
 def list_late(filters):
     conditions = ["1=1"]
     params = []
+    queue = (filters.get("queue") or "waiting").strip().lower()
+    if queue == "waiting":
+        conditions.append("(l.review_status IS NULL OR l.review_status = 'pending')")
+    elif queue == "done":
+        conditions.append("l.review_status IN ('present', 'absent', 'approved_leave')")
     if filters.get("date"):
         conditions.append("l.attendance_date = %s")
         params.append(filters["date"])
@@ -434,11 +439,13 @@ def list_late(filters):
     rows = fetch_all(
         f"""
         SELECT l.*, s.full_name, s.roll_number, sub.subject_name, sub.subject_code,
-               editor.full_name AS corrected_by_name
+               editor.full_name AS corrected_by_name,
+               decider.full_name AS decided_by_name
         FROM late_arrivals l
         JOIN students s ON s.id = l.student_id
         JOIN subjects sub ON sub.id = l.subject_id
         LEFT JOIN users editor ON editor.id = l.corrected_by
+        LEFT JOIN users decider ON decider.id = l.decided_by
         WHERE {' AND '.join(conditions)}
         ORDER BY l.attendance_date DESC, l.arrival_time DESC
         """,
@@ -524,6 +531,115 @@ def correct_late(late_id, teacher_id, arrival_time, note):
     return {"success": True, "minutes_late": minutes_late, "message": "Late record corrected and logged."}
 
 
+def decide_late(late_id, teacher_id, status, note=""):
+    """Teacher sets a flagged late arrival to present, absent, or leave."""
+    choices = {
+        "present": "present",
+        "absent": "absent",
+        "leave": "approved_leave",
+        "approved_leave": "approved_leave",
+    }
+    stored = choices.get((status or "").strip().lower())
+    if not stored:
+        return {"success": False, "message": "Choose present, absent, or leave."}
+    row = fetch_one("SELECT * FROM late_arrivals WHERE id = %s", (late_id,))
+    if not row:
+        return {"success": False, "message": "Late record not found."}
+    labels = {
+        "present": "Present",
+        "absent": "Absent",
+        "approved_leave": "Leave",
+    }
+    reason = note or f"Teacher marked this late arrival as {labels[stored].lower()}."
+    _apply_late_decision(row, stored, teacher_id, reason)
+    execute_query(
+        """
+        UPDATE late_arrivals
+        SET review_status = %s, decided_by = %s, decision_note = %s, updated_at = %s
+        WHERE id = %s
+        """,
+        (stored, teacher_id, reason, now_text(), late_id)
+    )
+    student = fetch_one("SELECT full_name, roll_number FROM students WHERE id = %s", (row["student_id"],))
+    attendance_service.log_audit(
+        teacher_id, "LATE_DECIDED", "late_arrivals", late_id,
+        f"{student['full_name']} marked {labels[stored]} for {row['attendance_date']}. {reason}"
+    )
+    user = user_for_student(row["student_id"])
+    if user:
+        notify(
+            user["id"],
+            "Attendance updated",
+            f"Your late arrival on {str(row['attendance_date'])[:10]} was marked {labels[stored].lower()}.",
+            "attendance"
+        )
+    return {
+        "success": True,
+        "status": stored,
+        "message": f"{student['full_name']} is marked {labels[stored].lower()}."
+    }
+
+
+def _apply_late_decision(row, status, teacher_id, note):
+    """Writes the teacher's choice onto the official attendance row."""
+    record = None
+    if row.get("session_id"):
+        record = fetch_one(
+            "SELECT id FROM attendance_records WHERE session_id = %s AND student_id = %s",
+            (row["session_id"], row["student_id"])
+        )
+    if not record:
+        record = fetch_one(
+            """
+            SELECT ar.id
+            FROM attendance_records ar
+            JOIN attendance_sessions s ON s.id = ar.session_id
+            WHERE ar.student_id = %s AND s.subject_id = %s AND s.session_date = %s
+            ORDER BY ar.id DESC
+            LIMIT 1
+            """,
+            (row["student_id"], row["subject_id"], str(row["attendance_date"])[:10])
+        )
+    if record:
+        attendance_service.update_attendance_status(record["id"], status, note, teacher_id)
+        return
+
+    slot = fetch_one(
+        """
+        SELECT classroom_id FROM lecture_slots
+        WHERE class_section = %s AND subject_id = %s
+        ORDER BY id LIMIT 1
+        """,
+        (row["class_section"], row["subject_id"])
+    )
+    classroom_id = slot["classroom_id"] if slot else 1
+    day = str(row["attendance_date"])[:10]
+    created = execute_query(
+        """
+        INSERT INTO attendance_sessions
+        (session_code, classroom_id, subject_id, teacher_id, session_date, start_time, end_time,
+         status, class_section, is_demo_mode)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 'completed', %s, 0)
+        """,
+        (
+            f"LATE-{row['id']}-{day.replace('-', '')}",
+            classroom_id, row["subject_id"], teacher_id, day,
+            str(row["lecture_start"] or "09:00:00")[:8],
+            str(row["lecture_start"] or "09:00:00")[:8],
+            row["class_section"]
+        )
+    )
+    execute_query(
+        """
+        INSERT INTO attendance_records
+        (session_id, student_id, status, verification_method, confidence_score,
+         repeated_observations, is_manually_edited, audit_note, edited_by)
+        VALUES (%s, %s, %s, 'teacher_late_review', 0, 0, 1, %s, %s)
+        """,
+        (created["last_id"], row["student_id"], status, note, teacher_id)
+    )
+
+
 def update_slot(slot_id, start_time, grace_minutes, teacher_id):
     if len(start_time) == 5:
         start_time += ":00"
@@ -603,6 +719,117 @@ def student_context(student_id):
         (student_id,)
     )
     return {"policy": policy, "recent": recent}
+
+
+def _status_counts(student_id):
+    rows = fetch_all(
+        """
+        SELECT LOWER(COALESCE(status, '')) AS status, COUNT(*) AS cnt
+        FROM attendance_records
+        WHERE student_id = %s
+        GROUP BY LOWER(COALESCE(status, ''))
+        """,
+        (student_id,)
+    )
+    counts = {row["status"]: int(row["cnt"]) for row in rows}
+    return {
+        "present": counts.get("present", 0),
+        "late": counts.get("late", 0),
+        "absent": counts.get("absent", 0),
+        "approved_leave": counts.get("approved_leave", 0),
+        "needs_review": counts.get("needs_review", 0) + counts.get("flagged", 0),
+    }
+
+
+def student_home(student_id):
+    """Personal dashboard: attendance, today's classes, and leave totals."""
+    student = fetch_one(
+        """
+        SELECT id, full_name, roll_number, student_id AS enrollment_no, email,
+               class_section, department, avatar_url
+        FROM students WHERE id = %s
+        """,
+        (student_id,)
+    )
+    if not student:
+        return None
+    policy = attendance_policy(student_id)
+    counts = _status_counts(student_id)
+    pending = fetch_one(
+        "SELECT COUNT(*) AS cnt FROM leave_applications WHERE student_id = %s AND status = 'pending'",
+        (student_id,)
+    )
+    approved = fetch_one(
+        "SELECT COUNT(*) AS cnt FROM leave_applications WHERE student_id = %s AND status = 'approved'",
+        (student_id,)
+    )
+    late_rows = fetch_one(
+        "SELECT COUNT(*) AS cnt FROM late_arrivals WHERE student_id = %s",
+        (student_id,)
+    )
+    recent = fetch_all(
+        """
+        SELECT ar.status, ar.timestamp, ar.confidence_score, ar.verification_method,
+               sub.subject_name, sub.subject_code, s.session_date
+        FROM attendance_records ar
+        JOIN attendance_sessions s ON s.id = ar.session_id
+        JOIN subjects sub ON sub.id = s.subject_id
+        WHERE ar.student_id = %s
+        ORDER BY s.session_date DESC, ar.timestamp DESC
+        LIMIT 12
+        """,
+        (student_id,)
+    )
+    section = student.get("class_section") or ""
+    lectures = [
+        slot for slot in today_schedule()
+        if not section or slot.get("class_section") == section
+    ]
+    today = datetime.date.today()
+    history = fetch_all(
+        """
+        SELECT ar.status, s.session_date
+        FROM attendance_records ar
+        JOIN attendance_sessions s ON s.id = ar.session_id
+        WHERE ar.student_id = %s AND s.session_date >= %s
+        """,
+        (student_id, (today - datetime.timedelta(days=6)).isoformat())
+    )
+    by_day = {}
+    for row in history:
+        day = str(row.get("session_date") or "")[:10]
+        bucket = by_day.setdefault(day, {"present": 0, "absent": 0})
+        status = (row.get("status") or "").lower()
+        if status in ("present", "late"):
+            bucket["present"] += 1
+        elif status == "absent":
+            bucket["absent"] += 1
+    weekly = []
+    for offset in range(6, -1, -1):
+        day = today - datetime.timedelta(days=offset)
+        key = day.isoformat()
+        bucket = by_day.get(key, {"present": 0, "absent": 0})
+        weekly.append({
+            "day": day.strftime("%a"),
+            "date": key,
+            "present": bucket["present"],
+            "absent": bucket["absent"],
+        })
+    threshold = setting_float("low_attendance_threshold", 75)
+    percentage = policy["percentage"]
+    return {
+        "student": student,
+        "policy": policy,
+        "counts": counts,
+        "pending_leaves": pending["cnt"] if pending else 0,
+        "approved_leaves": approved["cnt"] if approved else 0,
+        "late_marks": late_rows["cnt"] if late_rows else 0,
+        "recent": recent,
+        "lectures": lectures,
+        "weekly": weekly,
+        "threshold": threshold,
+        "below_threshold": percentage is not None and percentage < threshold,
+    }
 
 
 def low_attendance_students():

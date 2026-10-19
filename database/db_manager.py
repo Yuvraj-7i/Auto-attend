@@ -415,6 +415,9 @@ class DatabaseManager:
             source TEXT NOT NULL,
             correction_note TEXT,
             corrected_by INTEGER,
+            review_status TEXT DEFAULT 'pending',
+            decided_by INTEGER,
+            decision_note TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(student_id, subject_id, attendance_date, source),
@@ -572,6 +575,9 @@ class DatabaseManager:
             ("attendance_sessions", "lecture_slot_id", "INTEGER"),
             ("attendance_records", "arrival_status", "TEXT"),
             ("attendance_records", "teacher_verification", "TEXT"),
+            ("late_arrivals", "review_status", "TEXT DEFAULT 'pending'"),
+            ("late_arrivals", "decided_by", "INTEGER"),
+            ("late_arrivals", "decision_note", "TEXT"),
         )
         for table, column, typedef in additions:
             if self._column_exists(table, column):

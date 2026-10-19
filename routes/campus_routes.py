@@ -122,6 +122,7 @@ def photo_history():
 @teacher_required
 def late_list():
     rows = campus_service.list_late({
+        "queue": request.args.get("queue"),
         "date": request.args.get("date"),
         "month": request.args.get("month"),
         "class_section": request.args.get("class_section"),
@@ -146,6 +147,19 @@ def late_checkin():
         )
     except (TypeError, ValueError):
         return jsonify({"success": False, "message": "Enter a valid student, subject, date, and arrival time."}), 400
+    return jsonify(result), 200 if result.get("success") else 400
+
+
+@campus_bp.route("/late/<int:late_id>/decision", methods=["POST"])
+@teacher_required
+def late_decision(late_id):
+    data = request.get_json() or {}
+    result = campus_service.decide_late(
+        late_id,
+        session["user_id"],
+        data.get("status"),
+        (data.get("note") or "").strip()
+    )
     return jsonify(result), 200 if result.get("success") else 400
 
 
@@ -308,6 +322,25 @@ def student_percentages():
         "students": rows,
         "policy": "Approved leave is excluded. Present and late count as attended. Unmarked rows are not treated as absent."
     })
+
+
+@campus_bp.route("/dashboard/student", methods=["GET"])
+@login_required
+def student_dashboard():
+    if session.get("user_role") != "student":
+        return jsonify({"success": False, "message": "This dashboard is for student accounts."}), 403
+    account = fetch_one("SELECT student_ref_id FROM users WHERE id = %s", (session["user_id"],))
+    if not account or not account.get("student_ref_id"):
+        return jsonify({"success": False, "message": "This login is not linked to a student profile."}), 400
+    home = campus_service.student_home(account["student_ref_id"])
+    if not home:
+        return jsonify({"success": False, "message": "Student profile was not found."}), 404
+    unread = fetch_one(
+        "SELECT COUNT(*) AS cnt FROM notifications WHERE user_id = %s AND is_read = 0",
+        (session["user_id"],)
+    )
+    home["unread_notifications"] = unread["cnt"] if unread else 0
+    return jsonify({"success": True, **home})
 
 
 @campus_bp.route("/dashboard/teacher", methods=["GET"])
